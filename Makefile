@@ -1,5 +1,11 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -g -Isrc
+# -MMD -MP: generate .d dependency files so header changes trigger recompilation
+# -fstack-protector-strong: stack-smashing protection on functions with buffers
+# -D_FORTIFY_SOURCE=2: glibc buffer-overflow detection for string/mem functions
+CFLAGS  = -Wall -Wextra -O2 -g -Isrc \
+          -MMD -MP \
+          -fstack-protector-strong \
+          -D_FORTIFY_SOURCE=2
 LDFLAGS = -pthread
 
 # Directories
@@ -28,6 +34,9 @@ directories:
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
 	@echo "Build complete: $(TARGET)"
+
+# Include auto-generated header dependency files (produced by -MMD -MP)
+-include $(OBJECTS:.o=.d)
 
 # Compile source files to object files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c

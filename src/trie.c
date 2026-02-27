@@ -133,6 +133,33 @@ void lookup_trie(struct Trie* trie, char* word)
     free(buffer);
 }
 
+void remove_word(struct Trie *trie, char *word) {
+    if (!trie || !trie->head || !word) return;
+
+    struct Trie_Node *current = trie->head;
+
+    char word_copy[MAXLINE];
+    strncpy(word_copy, word, MAXLINE - 1);
+    word_copy[MAXLINE - 1] = '\0';
+
+    char *octet1 = word_copy;
+    char *octet2 = strchr(octet1, '.'); if (!octet2) return; *octet2++ = '\0';
+    char *octet3 = strchr(octet2, '.'); if (!octet3) return; *octet3++ = '\0';
+    char *octet4 = strchr(octet3, '.'); if (!octet4) return; *octet4++ = '\0';
+
+    int octet[4];
+    octet[0] = atoi(octet1); octet[1] = atoi(octet2);
+    octet[2] = atoi(octet3); octet[3] = atoi(octet4);
+
+    for (int i = 0; i < 4; i++) {
+        int index = octet[i];
+        if (index < 0 || index > 255) return;
+        if (!current->structure[index]) return; /* never inserted */
+        current = current->structure[index];
+    }
+    current->end = 0;
+}
+
 int test_ip(struct Trie* trie, char* word)
 {
     if(!trie || !trie->head || !word)

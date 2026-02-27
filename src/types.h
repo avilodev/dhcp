@@ -105,6 +105,7 @@ typedef struct {
     char *dns_servers[4];
     int dns_count;
     uint32_t lease_time;
+    char *domain_name;          /* option 15 — sent to clients as search domain */
     struct Trie *ip_table;
     struct Tree *mac_table;
     struct Tree *blacklist;

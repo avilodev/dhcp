@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "config.h"
 
 extern dhcp_config_t g_config;
@@ -23,18 +24,20 @@ int init_config(int argc, char **argv) {
     }
 
     /* Set fixed network configuration */
-    g_config.server_ip = strdup("192.168.1.2");
+    g_config.server_ip   = strdup("192.168.1.2");
     g_config.subnet_mask = strdup("255.255.255.0");
-    g_config.gateway = strdup("192.168.1.1");
-    g_config.lease_time = LEASE_TIME;
+    g_config.gateway     = strdup("192.168.1.1");
+    g_config.domain_name = strdup("avilo");
+    g_config.lease_time  = LEASE_TIME;
     
     /* Set DNS server to 192.168.1.2 as requested */
     g_config.dns_servers[0] = strdup("192.168.1.2");
     g_config.dns_count = 1;
 
     /* Validate all allocations succeeded */
-    if (!g_config.server_ip || !g_config.subnet_mask || 
-        !g_config.gateway || !g_config.dns_servers[0]) {
+    if (!g_config.server_ip || !g_config.subnet_mask ||
+        !g_config.gateway || !g_config.domain_name ||
+        !g_config.dns_servers[0]) {
         fprintf(stderr, "Error: Failed to allocate configuration strings\n");
         cleanup_config();
         return -1;
@@ -80,6 +83,10 @@ void cleanup_config(void) {
     if (g_config.gateway) {
         free(g_config.gateway);
         g_config.gateway = NULL;
+    }
+    if (g_config.domain_name) {
+        free(g_config.domain_name);
+        g_config.domain_name = NULL;
     }
     for (int i = 0; i < g_config.dns_count; i++) {
         if (g_config.dns_servers[i]) {
@@ -177,7 +184,6 @@ int create_server_socket(void) {
     }
     syslog(LOG_DEBUG, "  Socket created");
 
-    /* CRITICAL: Set socket options BEFORE binding */
     /* Allow broadcast packets */
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0) {
         syslog(LOG_ERR, "Failed to set SO_BROADCAST: %s", strerror(errno));
@@ -214,13 +220,19 @@ int create_server_socket(void) {
         return -1;
     }
     syslog(LOG_INFO, "Socket bound to 0.0.0.0:%d (all interfaces)", DHCP_SERVER_PORT);
+    
+    if (setsockopt(sock, IPPROTO_IP, IP_PKTINFO, &opt, sizeof(opt)) < 0) {
+        syslog(LOG_ERR, "Failed to set IP_PKTINFO: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
+    syslog(LOG_DEBUG, "  IP_PKTINFO enabled");
 
     /* Verify socket can receive broadcasts */
     int broadcast_enabled;
-    socklen_t len = sizeof(broadcast_enabled);
-    if (getsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enabled, &len) == 0) {
+    socklen_t blen = sizeof(broadcast_enabled);
+    if (getsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enabled, &blen) == 0)
         syslog(LOG_INFO, "Broadcast enabled: %s", broadcast_enabled ? "YES" : "NO");
-    }
 
     return sock;
 }
