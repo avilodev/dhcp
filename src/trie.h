@@ -28,6 +28,7 @@ struct Trie* create_trie();
 struct Trie_Node* add_node();
 
 void add_word(struct Trie*, char*);
+void remove_word(struct Trie*, char*);
 
 void lookup_trie(struct Trie*, char*);
 int test_ip(struct Trie*, char*);
