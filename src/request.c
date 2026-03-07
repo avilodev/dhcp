@@ -1,16 +1,16 @@
 #include "request.h"
 
-/* Log DHCP interaction to server.log */
-void log_dhcp_interaction(const char *message_type, const char *mac,
-                          const char *hostname, const char *ip) {
-    char server_log[256];
-    snprintf(server_log, sizeof(server_log), "%s%s", SERVER_PATH, SERVER_LOG_FILE);
+/* Log DHCP interaction to the server log file */
+void log_dhcp_interaction(dhcp_config_t *config, const char *message_type,
+                          const char *mac, const char *hostname, const char *ip) {
+    if (!config || !config->log_path) return;
 
-    int fd = open(server_log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = open(config->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
 
     time_t now = time(NULL);
-    struct tm *tm_now = localtime(&now);
+    struct tm tm_buf;
+    struct tm *tm_now = localtime_r(&now, &tm_buf);
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_now);
 
@@ -44,18 +44,27 @@ int process_dhcp_message(struct dhcp_packet *request,
                          struct dhcp_packet *response,
                          dhcp_options_t *opts,
                          dhcp_config_t *config,
-                         size_t *pkt_len) {
-    if (!request || !response || !opts || !config || !pkt_len) {
+                         size_t *pkt_len,
+                         dhcp_result_t *result) {
+    if (!request || !response || !opts || !config || !pkt_len || !result) {
         syslog(LOG_ERR, "process_dhcp_message: NULL parameter");
         return -1;
     }
 
+    memset(result, 0, sizeof(*result));
+
     char mac_str[MAC_STR_LEN];
     format_mac_address(request->chaddr, mac_str, sizeof(mac_str));
+    snprintf(result->mac, sizeof(result->mac), "%s", mac_str);
 
     /* Resolve the device identifier used for all lease lookups */
     char device_id[256];
     get_device_identifier(mac_str, opts, device_id, sizeof(device_id));
+    snprintf(result->device_id, sizeof(result->device_id), "%s", device_id);
+
+    /* Capture hostname from options if present */
+    if (opts->found_hostname && opts->hostname[0] != '\0')
+        snprintf(result->hostname, sizeof(result->hostname), "%s", opts->hostname);
 
     switch (opts->message_type) {
 
@@ -65,35 +74,28 @@ int process_dhcp_message(struct dhcp_packet *request,
                    opts->found_hostname ? " hostname=" : "",
                    opts->found_hostname ? opts->hostname : "");
 
-            log_dhcp_interaction("DHCPDISCOVER", mac_str,
-                                 opts->found_hostname ? opts->hostname : NULL,
-                                 NULL);
-
             if (build_offer(response, request, opts, config, pkt_len) < 0) {
                 syslog(LOG_ERR, "Failed to build DHCPOFFER for %s", mac_str);
                 return -1;
             }
 
+            /* Capture offered IP for post-lock logging */
             {
                 struct in_addr oa; oa.s_addr = response->yiaddr;
-                char offered_ip[IP_STR_LEN];
-                strncpy(offered_ip, inet_ntoa(oa), IP_STR_LEN - 1);
-                offered_ip[IP_STR_LEN - 1] = '\0';
-                log_dhcp_interaction("DHCPOFFER", mac_str,
-                                     opts->found_hostname ? opts->hostname : NULL,
-                                     offered_ip);
-                syslog(LOG_INFO, "Sending DHCPOFFER %s to %s", offered_ip, mac_str);
+                inet_ntop(AF_INET, &oa, result->resp_ip, sizeof(result->resp_ip));
             }
+            strncpy(result->req_log,  "DHCPDISCOVER", sizeof(result->req_log)  - 1);
+            strncpy(result->resp_log, "DHCPOFFER",    sizeof(result->resp_log) - 1);
+            syslog(LOG_INFO, "Sending DHCPOFFER %s to %s", result->resp_ip, mac_str);
             break;
 
-        /* ------------------------------------------------------------------ */
         case DHCPREQUEST: {
             syslog(LOG_INFO, "DHCPREQUEST from %s", mac_str);
 
             uint32_t our_ip = inet_addr(config->server_ip);
 
             if (opts->found_server_id) {
-                /* SELECTING state: client is responding to an OFFER. */
+                /* Client picked an offer — server ID present means SELECTING state */
                 if (opts->server_identifier != our_ip) {
                     syslog(LOG_DEBUG,
                            "DHCPREQUEST for other server (0x%08X) from %s — discarding",
@@ -101,7 +103,7 @@ int process_dhcp_message(struct dhcp_packet *request,
                     return -1;
                 }
 
-                /* Verify the requested IP matches the lease we issued */
+                /* Make sure it's actually asking for the IP we offered */
                 if (opts->found_requested_ip) {
                     char *expected = find_existing_lease(device_id, config);
                     bool mismatch = (!expected ||
@@ -118,7 +120,8 @@ int process_dhcp_message(struct dhcp_packet *request,
                 }
 
             } else if (opts->found_requested_ip) {
-                /* INIT-REBOOT state: client rebooted and wants to reconfirm its previous address. */
+                /* No server ID but has a requested IP — client is rebooting and
+                 * trying to reclaim the address it had before */
                 char *existing = find_existing_lease(device_id, config);
                 if (!existing) {
                     syslog(LOG_INFO,
@@ -137,22 +140,36 @@ int process_dhcp_message(struct dhcp_packet *request,
                     return 0;
                 }
 
+            } else {
+                /* No server ID and no requested IP — client is renewing or rebinding.
+                 * ciaddr is its current address; make sure it matches what we have. */
+                if (request->ciaddr != 0) {
+                    char *existing = find_existing_lease(device_id, config);
+                    if (!existing) {
+                        syslog(LOG_WARNING,
+                               "DHCPREQUEST RENEWING: no lease for %s — NAK",
+                               mac_str);
+                        if (build_nak(response, request, config, pkt_len) < 0)
+                            return -1;
+                        return 0;
+                    }
+                    bool mismatch = (request->ciaddr != inet_addr(existing));
+                    free(existing);
+                    if (mismatch) {
+                        syslog(LOG_WARNING,
+                               "DHCPREQUEST RENEWING: ciaddr mismatch for %s — NAK",
+                               mac_str);
+                        if (build_nak(response, request, config, pkt_len) < 0)
+                            return -1;
+                        return 0;
+                    }
+                }
             }
-            /* else: RENEWING/REBINDING — ciaddr is set, no server_id, no opt 50.
-             * Just confirm the existing lease. */
 
+            /* Record the requested IP for the log line */
             if (opts->found_requested_ip) {
                 struct in_addr ra; ra.s_addr = opts->requested_ip;
-                char req_ip[IP_STR_LEN];
-                strncpy(req_ip, inet_ntoa(ra), IP_STR_LEN - 1);
-                req_ip[IP_STR_LEN - 1] = '\0';
-                log_dhcp_interaction("DHCPREQUEST", mac_str,
-                                     opts->found_hostname ? opts->hostname : NULL,
-                                     req_ip);
-            } else {
-                log_dhcp_interaction("DHCPREQUEST", mac_str,
-                                     opts->found_hostname ? opts->hostname : NULL,
-                                     NULL);
+                inet_ntop(AF_INET, &ra, result->req_ip, sizeof(result->req_ip));
             }
 
             if (build_ack(response, request, opts, config, pkt_len) < 0) {
@@ -160,40 +177,48 @@ int process_dhcp_message(struct dhcp_packet *request,
                 return -1;
             }
 
+            /* Grab the confirmed IP for the log and the lease file update */
+            {
+                struct in_addr ya; ya.s_addr = response->yiaddr;
+                inet_ntop(AF_INET, &ya, result->resp_ip, sizeof(result->resp_ip));
+            }
+
+            /* Stamp the confirmed expiry time and hostname while we still hold the lock */
             update_lease_expiry(device_id,
                                 time(NULL) + (time_t)config->lease_time,
                                 config);
+            update_node_hostname(config->mac_table, device_id,
+                                 result->hostname[0] ? result->hostname : NULL);
 
-            if (update_lease_database(mac_str, opts, config) < 0)
-                syslog(LOG_WARNING, "Failed to update lease database for %s",
-                       mac_str);
-
-            syslog(LOG_INFO, "Sending DHCPACK to %s", mac_str);
+            strncpy(result->req_log,  "DHCPREQUEST", sizeof(result->req_log)  - 1);
+            strncpy(result->resp_log, "DHCPACK",     sizeof(result->resp_log) - 1);
+            result->write_lease_db = true;
+            syslog(LOG_INFO, "Sending DHCPACK %s to %s", result->resp_ip, mac_str);
             break;
         }
 
         case DHCPRELEASE:
             syslog(LOG_INFO, "DHCPRELEASE from %s (device %s)", mac_str, device_id);
-            log_dhcp_interaction("DHCPRELEASE", mac_str, NULL, NULL);
             release_ip_address(device_id, config);
-            return -1;   /* no response */
+            strncpy(result->req_log, "DHCPRELEASE", sizeof(result->req_log) - 1);
+            result->remove_lease_db = true;
+            return -1;   /* no reply needed; the log entry goes out via req_log */
 
         case DHCPDECLINE:
             syslog(LOG_WARNING, "DHCPDECLINE from %s (device %s)", mac_str, device_id);
-            log_dhcp_interaction("DHCPDECLINE", mac_str, NULL, NULL);
             if (opts->found_requested_ip)
                 mark_ip_declined(opts->requested_ip, device_id, config);
-            return -1;   /* no response */
+            strncpy(result->req_log, "DHCPDECLINE", sizeof(result->req_log) - 1);
+            return -1;   /* no reply needed */
 
         case DHCPINFORM:
             syslog(LOG_INFO, "DHCPINFORM from %s", mac_str);
-            log_dhcp_interaction("DHCPINFORM", mac_str,
-                                 opts->found_hostname ? opts->hostname : NULL,
-                                 NULL);
             if (build_inform_ack(response, request, opts, config, pkt_len) < 0) {
                 syslog(LOG_ERR, "Failed to build INFORM ACK for %s", mac_str);
                 return -1;
             }
+            strncpy(result->req_log,  "DHCPINFORM", sizeof(result->req_log)  - 1);
+            strncpy(result->resp_log, "DHCPACK",    sizeof(result->resp_log) - 1);
             syslog(LOG_INFO, "Sending INFORM ACK to %s", mac_str);
             break;
 
@@ -214,6 +239,11 @@ int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts) {
         return -1;
 
     memset(opts, 0, sizeof(dhcp_options_t));
+
+    if (packet->op != 1) {
+        syslog(LOG_WARNING, "Rejected non-BOOTREQUEST packet (op=%d)", packet->op);
+        return -1;
+    }
 
     if (ntohl(packet->magic_cookie) != DHCP_MAGIC_COOKIE) {
         syslog(LOG_WARNING, "Invalid magic cookie: 0x%08X",
