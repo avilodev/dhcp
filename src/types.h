@@ -50,11 +50,16 @@
 
 /* File Paths */
 #define SERVER_PATH         "/home/avilo/dhcp"
-#define LEASE_DB_FILE       "/misc/members.txt"     
+#define LEASE_DB_FILE       "/misc/members.txt"
 #define STATIC_FILE         "/misc/static_list.txt"
 #define BLACKLIST_FILE      "/misc/blacklist.txt"
 #define PID_FILE            "/misc/server.pid"
 #define SERVER_LOG_FILE     "/misc/server.log"
+#define DUMP_FILE           "/misc/leases_current.txt"
+
+/* Thread pool defaults */
+#define DEFAULT_WORKERS     4
+#define MAX_WORKERS         64
 
 /* DHCP Packet Structure (RFC 2131) */
 struct dhcp_packet {
@@ -106,9 +111,17 @@ typedef struct {
     int dns_count;
     uint32_t lease_time;
     char *domain_name;          /* option 15 — sent to clients as search domain */
+    /* Runtime file paths — populated from dhcp.conf or compile-time defaults */
+    char *lease_db_path;
+    char *static_path;
+    char *blacklist_path;
+    char *log_path;
+    char *pid_path;
     struct Trie *ip_table;
     struct Tree *mac_table;
     struct Tree *blacklist;
+    int          num_workers; /* thread pool size (default DEFAULT_WORKERS) */
+    char        *dump_path;   /* path for SIGUSR1 lease dump output */
 } dhcp_config_t;
 
 /* Lease Information */

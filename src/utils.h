@@ -16,6 +16,7 @@ char *check_static_assignment(const char *mac, dhcp_config_t *config);
 char *find_free_ip(dhcp_config_t *config);
 
 int release_ip_address(const char *device_id, dhcp_config_t *config);
+void sweep_expired_leases(dhcp_config_t *config);
 
 int mark_ip_declined(uint32_t ip, const char *device_id,
                      dhcp_config_t *config);

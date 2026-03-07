@@ -6,9 +6,9 @@
 #include "utils.h"
 #include <time.h>
 
-/* Tentative reservation lifetime (seconds).  An IP offered in a DHCPOFFER
- * but never confirmed by a DHCPREQUEST is automatically freed after this. */
-#define OFFER_TENTATIVE_SECS 30
+/* How long we hold an IP after sending an OFFER before giving up on the client.
+ * If the DHCPREQUEST never comes, the slot gets reclaimed on the next sweep. */
+#define OFFER_TENTATIVE_SECS 60
 
 char *get_device_identifier(const char *mac, dhcp_options_t *opts,
                             char *buffer, size_t buflen) {
@@ -44,12 +44,11 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
     char device_id[256];
     get_device_identifier(mac, opts, device_id, sizeof(device_id));
 
-    /* Collision detection: same MAC and Client-ID map to different nodes */
+    /* If the same hardware address has somehow ended up with two different
+     * lease entries (one by MAC, one by Client-ID), clean up the stale one */
     if (opts && opts->found_client_id) {
-        struct Tree_Node *mac_node = find_node(config->mac_table,
-                                               hash_string(mac));
-        struct Tree_Node *id_node  = find_node(config->mac_table,
-                                               hash_string(device_id));
+        struct Tree_Node *mac_node = find_node(config->mac_table, mac);
+        struct Tree_Node *id_node  = find_node(config->mac_table, device_id);
         if (mac_node && id_node && mac_node != id_node) {
             syslog(LOG_WARNING,
                    "Client-ID collision: MAC %s has different lease than "
@@ -62,7 +61,7 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
         }
     }
 
-    /* Check for existing (non-expired) lease */
+    /* If this device already has a valid lease, hand the same IP back */
     char *existing = find_existing_lease(device_id, config);
     if (existing) {
         syslog(LOG_DEBUG, "Reusing IP %s for device %s (MAC: %s)",
@@ -70,15 +69,15 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
         return existing;
     }
 
-    /* Check for static assignment (never expires) */
+    /* Static assignments always win over the dynamic pool */
     char *static_ip = check_static_assignment(mac, config);
     if (static_ip) {
         syslog(LOG_INFO, "Using static assignment %s for MAC %s",
                static_ip, mac);
-        if (!find_node(config->mac_table, hash_string(device_id))) {
+        if (!find_node(config->mac_table, device_id)) {
             char *ip_copy = strdup(static_ip);
             if (ip_copy)
-                add_tree_node(config->mac_table, hash_string(device_id),
+                add_tree_node(config->mac_table, device_id,
                               ip_copy, 0 /* static: no expiry */);
         }
         if (!test_ip(config->ip_table, static_ip))
@@ -86,19 +85,23 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
         return static_ip;
     }
 
-    /* Allocate new IP with a short tentative expiry.
-     * If the client never sends a DHCPREQUEST the slot is freed after
-     * OFFER_TENTATIVE_SECS seconds so the pool does not fill up. */
+    /* New device — find a free IP.  Short expiry means if the client goes
+     * silent the slot comes back after OFFER_TENTATIVE_SECS seconds. */
     char *new_ip = find_free_ip(config);
     if (new_ip) {
-        if (!find_node(config->mac_table, hash_string(device_id))) {
+        struct Tree_Node *existing_node = find_node(config->mac_table, device_id);
+        if (!existing_node) {
             char *ip_copy = strdup(new_ip);
             if (!ip_copy) {
                 free(new_ip);
                 return NULL;
             }
-            add_tree_node(config->mac_table, hash_string(device_id),
+            add_tree_node(config->mac_table, device_id,
                           ip_copy, time(NULL) + OFFER_TENTATIVE_SECS);
+        } else if (!existing_node->ip) {
+            /* Node exists (from a prior DECLINE or RELEASE) but has no IP — fill it in */
+            existing_node->ip      = strdup(new_ip);
+            existing_node->expires = time(NULL) + OFFER_TENTATIVE_SECS;
         }
         syslog(LOG_INFO, "Allocated new IP %s for device %s (MAC: %s)",
                new_ip, device_id, mac);
@@ -106,14 +109,13 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
     return new_ip;
 }
 
-/* Returns a strdup'd copy of the IP, or NULL if not found / expired.
- * Expired leases are reclaimed here so the pool stays healthy. */
+/* Returns the device's current IP, or NULL if it doesn't have one or
+ * the lease expired.  Reclaims the slot on expiry so the pool stays healthy. */
 char *find_existing_lease(const char *device_id, dhcp_config_t *config) {
     if (!device_id || !config || !config->mac_table)
         return NULL;
 
-    struct Tree_Node *node = find_node(config->mac_table,
-                                       hash_string(device_id));
+    struct Tree_Node *node = find_node(config->mac_table, device_id);
     if (!node || !node->ip)
         return NULL;
 
@@ -130,56 +132,16 @@ char *find_existing_lease(const char *device_id, dhcp_config_t *config) {
     return strdup(node->ip);
 }
 
+/* Static assignments have expires=0 so they're easy to identify.  They're
+ * already in memory from startup, so no file access needed here. */
 char *check_static_assignment(const char *mac, dhcp_config_t *config) {
-    (void)config;
+    if (!mac || !config || !config->mac_table) return NULL;
 
-    char static_file_path[256];
-    snprintf(static_file_path, sizeof(static_file_path), "%s%s",
-             SERVER_PATH, STATIC_FILE);
+    struct Tree_Node *node = find_node(config->mac_table, mac);
+    if (node && node->ip && node->expires == 0)
+        return strdup(node->ip);
 
-    int fd = open(static_file_path, O_RDONLY);
-    if (fd < 0) return NULL;
-
-    char *buffer = malloc(MAXLINE);
-    if (!buffer) { close(fd); return NULL; }
-
-    ssize_t bytes_read = read(fd, buffer, MAXLINE - 1);
-    close(fd);
-    if (bytes_read <= 0) { free(buffer); return NULL; }
-    buffer[bytes_read] = '\0';
-
-    char *save_ptr;
-    char *line   = strtok_r(buffer, "\n", &save_ptr);
-    char *result = NULL;
-
-    while (line) {
-        if (line[0] == '#' || line[0] == '\0' || line[0] == '\n') {
-            line = strtok_r(NULL, "\n", &save_ptr);
-            continue;
-        }
-
-        char line_copy[256];
-        strncpy(line_copy, line, sizeof(line_copy) - 1);
-        line_copy[sizeof(line_copy) - 1] = '\0';
-
-        char *token = strtok(line_copy, " \t");
-        if (!token || strcmp(token, "device") != 0) {
-            line = strtok_r(NULL, "\n", &save_ptr);
-            continue;
-        }
-
-        char *file_mac = strtok(NULL, " \t");
-        char *ip       = strtok(NULL, " \t\r\n");
-
-        if (file_mac && ip && strcasecmp(mac, file_mac) == 0) {
-            result = strdup(ip);
-            break;
-        }
-        line = strtok_r(NULL, "\n", &save_ptr);
-    }
-
-    free(buffer);
-    return result;
+    return NULL;
 }
 
 char *find_free_ip(dhcp_config_t *config) {
@@ -194,10 +156,16 @@ char *find_free_ip(dhcp_config_t *config) {
         return NULL;
     }
 
+    uint32_t pool_size = end - start + 1;
+
+    /* Random start so devices can't predict what IP they'll get next time */
+    uint32_t offset = (uint32_t)rand() % pool_size;
+
     char *new_ip = malloc(IP_STR_LEN);
     if (!new_ip) return NULL;
 
-    for (uint32_t v = start; v <= end; v++) {
+    for (uint32_t i = 0; i < pool_size; i++) {
+        uint32_t v = start + ((offset + i) % pool_size);
         snprintf(new_ip, IP_STR_LEN, "%u.%u.%u.%u",
                  (v >> 24) & 0xFF, (v >> 16) & 0xFF,
                  (v >>  8) & 0xFF,  v        & 0xFF);
@@ -216,8 +184,7 @@ char *find_free_ip(dhcp_config_t *config) {
 int release_ip_address(const char *device_id, dhcp_config_t *config) {
     if (!device_id || !config) return -1;
 
-    struct Tree_Node *node = find_node(config->mac_table,
-                                       hash_string(device_id));
+    struct Tree_Node *node = find_node(config->mac_table, device_id);
     if (node && node->ip) {
         syslog(LOG_INFO, "Released IP %s for device %s",
                node->ip, device_id);
@@ -236,17 +203,16 @@ int mark_ip_declined(uint32_t ip, const char *device_id,
     struct in_addr addr;
     addr.s_addr = ip;
     char ip_str[IP_STR_LEN];
-    strncpy(ip_str, inet_ntoa(addr), IP_STR_LEN - 1);
-    ip_str[IP_STR_LEN - 1] = '\0';
+    inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
 
-    /* Keep the IP permanently reserved so it is never re-offered */
+    /* Permanently reserve this IP — something on the network already owns it
+     * so we should never offer it to anyone again */
     add_word(config->ip_table, ip_str);
     syslog(LOG_WARNING, "IP %s marked as declined (ARP conflict)", ip_str);
 
-    /* Clear the device's mac_table entry so it receives a fresh IP */
+    /* Wipe the device's IP slot so its next DISCOVER gets a different address */
     if (device_id) {
-        struct Tree_Node *node = find_node(config->mac_table,
-                                           hash_string(device_id));
+        struct Tree_Node *node = find_node(config->mac_table, device_id);
         if (node && node->ip) {
             free(node->ip);
             node->ip      = NULL;
@@ -260,12 +226,32 @@ int update_lease_expiry(const char *device_id, time_t expires,
                         dhcp_config_t *config) {
     if (!device_id || !config || !config->mac_table) return -1;
 
-    struct Tree_Node *node = find_node(config->mac_table,
-                                       hash_string(device_id));
+    struct Tree_Node *node = find_node(config->mac_table, device_id);
     if (!node) return -1;
 
     node->expires = expires;
     return 0;
+}
+
+static void sweep_node(struct Tree_Node *node, struct Trie *ip_table, time_t now) {
+    if (!node) return;
+    sweep_node(node->left, ip_table, now);
+    sweep_node(node->right, ip_table, now);
+    /* Walk this BST node and anything chained off it (hash collisions) */
+    for (struct Tree_Node *n = node; n; n = n->chain) {
+        if (n->ip && n->expires > 0 && n->expires <= now) {
+            remove_word(ip_table, n->ip);
+            free(n->ip);
+            n->ip      = NULL;
+            n->expires = 0;
+        }
+    }
+}
+
+void sweep_expired_leases(dhcp_config_t *config) {
+    if (!config || !config->mac_table || !config->ip_table) return;
+    sweep_node(config->mac_table->head, config->ip_table, time(NULL));
+    syslog(LOG_DEBUG, "Expired lease sweep complete");
 }
 
 bool is_ip_available(const char *ip, dhcp_config_t *config) {
@@ -288,7 +274,8 @@ bool validate_mac_address(const char *mac) {
 }
 
 char *format_timestamp(time_t t) {
-    struct tm *tm = gmtime(&t);
+    struct tm tm_buf;
+    struct tm *tm = gmtime_r(&t, &tm_buf);
     if (!tm) return NULL;
     char *str = malloc(64);
     if (str && strftime(str, 64, "%a, %d %b %Y %H:%M:%S GMT", tm) == 0) {
@@ -324,8 +311,7 @@ void uint32_to_ip_string(uint32_t ip, char *buf, size_t buflen) {
     if (!buf || buflen == 0) return;
     struct in_addr addr;
     addr.s_addr = ip;
-    strncpy(buf, inet_ntoa(addr), buflen - 1);
-    buf[buflen - 1] = '\0';
+    inet_ntop(AF_INET, &addr, buf, (socklen_t)buflen);
 }
 
 void format_mac_address(const uint8_t *mac, char *buf, size_t buflen) {
