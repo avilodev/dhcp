@@ -10,5 +10,8 @@ misc/refresh.log
 misc/backups/
 misc/*.tmp
 
+# Generated config (built from misc/dhcp.conf.in by `make`)
+misc/dhcp.conf
+
 # Editor
 .vscode/

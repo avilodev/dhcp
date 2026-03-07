@@ -2,9 +2,10 @@
 
 # DHCP Server Maintenance Script
 # Run this daily via cron to keep the server healthy
-# Add to crontab: 0 3 * * * /home/avilo/dhcp/misc/maintence.sh
+# Add to crontab: 0 3 * * * /path/to/dhcp/misc/maintence.sh
 
-SERVER_PATH="/home/avilo/dhcp"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_PATH="$(dirname "$SCRIPT_DIR")"
 MEMBERS_FILE="$SERVER_PATH/misc/members.txt"
 SERVER_LOG="$SERVER_PATH/misc/server.log"
 PID_FILE="$SERVER_PATH/misc/server.pid"
