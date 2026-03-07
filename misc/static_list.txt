@@ -1,2 +1,3 @@
+# Device Name - MAC Address - IP Address
 raspberrypi 88:A2:9E:1D:5B:93 192.168.1.2
 raspberrypi B8:27:EB:47:62:6A 192.168.1.3 
