@@ -22,19 +22,20 @@ lease_time   86400
 
 # ---- Runtime File Paths -----------------------------------------------------
 
-# Active lease database — appended on each DHCPACK, compacted every 24 h.
-lease_db     /home/avilo/dhcp/misc/members.txt
+# Active lease database — one entry per active device, written on DHCPACK,
+# removed on DHCPRELEASE.
+lease_db     @PREFIX@/misc/members.txt
 
 # Static MAC-to-IP assignments.
 # Format (one entry per line):  <label>  <MAC>  <IP>
 # Example:  mydevice  AA:BB:CC:DD:EE:FF  192.168.1.5
-static       /home/avilo/dhcp/misc/static_list.txt
+static       @PREFIX@/misc/static_list.txt
 
 # MAC address blacklist — one MAC per line, no response sent to listed MACs.
-blacklist    /home/avilo/dhcp/misc/blacklist.txt
+blacklist    @PREFIX@/misc/blacklist.txt
 
 # Readable interaction log.
-log          /home/avilo/dhcp/misc/server.log
+log          @PREFIX@/misc/server.log
 
 # PID file written at startup, removed on clean exit.
-pid          /home/avilo/dhcp/misc/server.pid
+pid          @PREFIX@/misc/server.pid

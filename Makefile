@@ -1,3 +1,6 @@
+# Root directory of the project — used to stamp paths into dhcp.conf
+PREFIX := $(CURDIR)
+
 CC = gcc
 # -MMD -MP: generate .d dependency files so header changes trigger recompilation
 # -fstack-protector-strong: stack-smashing protection on functions with buffers
@@ -23,7 +26,7 @@ OBJECTS = $(addprefix $(OBJ_DIR)/, $(SOURCES:.c=.o))
 TARGET = $(BIN_DIR)/dhcp_server
 
 # Default target
-all: directories $(TARGET)
+all: directories configure $(TARGET)
 
 # Create necessary directories
 directories:
@@ -41,6 +44,13 @@ $(TARGET): $(OBJECTS)
 # Compile source files to object files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Generate config files from templates, stamping in the current directory path.
+# Re-run this if you move the project to a different location.
+configure: misc/dhcp.conf
+
+misc/dhcp.conf: misc/dhcp.conf.in
+	sed 's|@PREFIX@|$(PREFIX)|g' $< > $@
 
 # Clean build artifacts
 clean:
@@ -60,4 +70,4 @@ debug:
 	@echo "Objects: $(OBJECTS)"
 	@echo "Target: $(TARGET)"
 
-.PHONY: all clean rebuild run debug directories
+.PHONY: all clean rebuild run debug directories configure
