@@ -117,12 +117,31 @@ int init_config(int argc, char **argv) {
         }
     }
 
-    if (!validate_ip_address(g_config.start_ip) ||
-        !validate_ip_address(g_config.end_ip)   ||
-        !validate_ip_address(g_config.server_ip)) {
-        fprintf(stderr, "Error: Invalid IP address in configuration\n");
-        cleanup_config();
-        return -1;
+    /* Validate every IP-valued setting so a typo fails fast at startup
+     * instead of silently emitting 255.255.255.255 to clients. */
+    const struct { const char *name; const char *val; } ip_settings[] = {
+        { "start_ip",    g_config.start_ip    },
+        { "end_ip",      g_config.end_ip      },
+        { "server_ip",   g_config.server_ip   },
+        { "subnet_mask", g_config.subnet_mask },
+        { "gateway",     g_config.gateway     },
+    };
+    for (size_t i = 0; i < sizeof(ip_settings) / sizeof(ip_settings[0]); i++) {
+        if (!validate_ip_address(ip_settings[i].val)) {
+            fprintf(stderr, "Error: Invalid %s in configuration: %s\n",
+                    ip_settings[i].name,
+                    ip_settings[i].val ? ip_settings[i].val : "(null)");
+            cleanup_config();
+            return -1;
+        }
+    }
+    for (int i = 0; i < g_config.dns_count; i++) {
+        if (!validate_ip_address(g_config.dns_servers[i])) {
+            fprintf(stderr, "Error: Invalid dns address in configuration: %s\n",
+                    g_config.dns_servers[i] ? g_config.dns_servers[i] : "(null)");
+            cleanup_config();
+            return -1;
+        }
     }
 
     syslog(LOG_INFO, "Configuration:");

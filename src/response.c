@@ -97,18 +97,18 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
     ADD_OPTION_U32(1,  inet_addr(config->subnet_mask));
     ADD_OPTION_U32(3,  inet_addr(config->gateway));
 
-    /* Option 6: DNS servers */
-    if (config->dns_count > 0 && config->dns_servers[0]) {
-        uint8_t dns_buf[8];
-        uint32_t dns1 = inet_addr(config->dns_servers[0]);
-        memcpy(dns_buf, &dns1, 4);
-        int dns_len = 4;
-        if (config->dns_count >= 2 && config->dns_servers[1]) {
-            uint32_t dns2 = inet_addr(config->dns_servers[1]);
-            memcpy(dns_buf + 4, &dns2, 4);
-            dns_len = 8;
+    /* Option 6: DNS servers — send all configured (up to 4) */
+    if (config->dns_count > 0) {
+        uint8_t dns_buf[16];
+        int dns_len = 0;
+        for (int i = 0; i < config->dns_count && i < 4; i++) {
+            if (!config->dns_servers[i]) continue;
+            uint32_t d = inet_addr(config->dns_servers[i]);
+            memcpy(dns_buf + dns_len, &d, 4);
+            dns_len += 4;
         }
-        ADD_OPTION(6, dns_len, dns_buf);
+        if (dns_len > 0)
+            ADD_OPTION(6, dns_len, dns_buf);
     }
 
     /* Option 28: Broadcast address */
@@ -228,18 +228,17 @@ int build_inform_ack(struct dhcp_packet *resp, struct dhcp_packet *req,
     NOADDR_U32(1,  inet_addr(config->subnet_mask));
     NOADDR_U32(3,  inet_addr(config->gateway));
 
-    /* Option 6: DNS servers */
-    if (config->dns_count > 0 && config->dns_servers[0]) {
-        uint8_t dns_buf[8];
-        uint32_t dns1 = inet_addr(config->dns_servers[0]);
-        memcpy(dns_buf, &dns1, 4);
-        int dns_len = 4;
-        if (config->dns_count >= 2 && config->dns_servers[1]) {
-            uint32_t dns2 = inet_addr(config->dns_servers[1]);
-            memcpy(dns_buf + 4, &dns2, 4);
-            dns_len = 8;
+    /* Option 6: DNS servers — send all configured (up to 4) */
+    if (config->dns_count > 0) {
+        uint8_t dns_buf[16];
+        int dns_len = 0;
+        for (int i = 0; i < config->dns_count && i < 4; i++) {
+            if (!config->dns_servers[i]) continue;
+            uint32_t d = inet_addr(config->dns_servers[i]);
+            memcpy(dns_buf + dns_len, &d, 4);
+            dns_len += 4;
         }
-        if (opt + 2 + dns_len <= opt_end) {
+        if (dns_len > 0 && opt + 2 + dns_len <= opt_end) {
             *opt++ = 6;
             *opt++ = (uint8_t)dns_len;
             memcpy(opt, dns_buf, dns_len);
