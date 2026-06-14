@@ -109,6 +109,8 @@ typedef struct {
     char *gateway;
     char *dns_servers[4];
     int dns_count;
+    char *ntp_servers[4];       /* option 42 — only sent when a client requests it */
+    int ntp_count;
     uint32_t lease_time;
     char *domain_name;          /* option 15 — sent to clients as search domain */
     /* Runtime file paths — populated from dhcp.conf or compile-time defaults */
