@@ -30,11 +30,7 @@ struct Trie_Node* add_node();
 void add_word(struct Trie*, char*);
 void remove_word(struct Trie*, char*);
 
-void lookup_trie(struct Trie*, char*);
 int test_ip(struct Trie*, char*);
-
-void print_trie(struct Trie*);
-void print_trie_helper(struct Trie_Node*, char*, int);
 
 void free_node(struct Trie_Node*);
 void free_trie(struct Trie*);

@@ -26,14 +26,18 @@ typedef struct {
     bool remove_lease_db;    /* true → call remove_lease_from_database after unlock */
 } dhcp_result_t;
 
-void log_dhcp_interaction(dhcp_config_t *config, const char *message_type,
-                          const char *mac, const char *hostname, const char *ip);
+void log_dhcp_interaction(dhcp_config_t *config, const char *event,
+                          const char *mac, const char *device_id,
+                          const char *hostname, const char *ip);
 int process_dhcp_message(struct dhcp_packet *request,
                         struct dhcp_packet *response,
                         dhcp_options_t *opts,
                         dhcp_config_t *config,
                         size_t *pkt_len,
                         dhcp_result_t *result);
-int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts);
+/* opt_len is the number of option bytes actually received (packet length minus
+ * the fixed header), so parsing never reads past the end of the real packet. */
+int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts,
+                       size_t opt_len);
 
 #endif /* REQUEST_H */ 

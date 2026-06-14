@@ -42,6 +42,7 @@ static int parse_config_file(const char *path, dhcp_config_t *config) {
             else syslog(LOG_WARNING, "dhcp.conf: workers must be 1–%d", MAX_WORKERS);
         }
         else if (strcmp(key, "dump") == 0) { free(config->dump_path); config->dump_path = strdup(value); }
+        else if (strcmp(key, "user") == 0) { free(config->run_as_user); config->run_as_user = strdup(value); }
         else if (strcmp(key, "dns") == 0) {
             if (config->dns_count < 4) {
                 free(config->dns_servers[config->dns_count]);
@@ -147,6 +148,7 @@ void cleanup_config(void) {
     free(g_config.log_path);       g_config.log_path       = NULL;
     free(g_config.pid_path);       g_config.pid_path       = NULL;
     free(g_config.dump_path);      g_config.dump_path      = NULL;
+    free(g_config.run_as_user);    g_config.run_as_user    = NULL;
 
     for (int i = 0; i < 4; i++) {
         free(g_config.dns_servers[i]);

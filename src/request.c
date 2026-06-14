@@ -1,41 +1,44 @@
 #include "request.h"
 
-/* Log DHCP interaction to the server log file */
-void log_dhcp_interaction(dhcp_config_t *config, const char *message_type,
-                          const char *mac, const char *hostname, const char *ip) {
-    if (!config || !config->log_path) return;
+/* One CSV record per call:  timestamp,event,mac,client_id,hostname,ip
+ * Empty fields are left blank (e.g. no IP yet on a DISCOVER).  Mirrors the
+ * DNS server's server.log convention so the same tooling parses both. */
+void log_dhcp_interaction(dhcp_config_t *config, const char *event,
+                          const char *mac, const char *device_id,
+                          const char *hostname, const char *ip) {
+    if (!config || !config->log_path || !event) return;
 
     int fd = open(config->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
 
     time_t now = time(NULL);
     struct tm tm_buf;
-    struct tm *tm_now = localtime_r(&now, &tm_buf);
-    char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_now);
+    char ts[32];
+    if (localtime_r(&now, &tm_buf))
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+    else
+        snprintf(ts, sizeof(ts), "0000-00-00 00:00:00");
 
-    char log_entry[512];
-    if (hostname && hostname[0] != '\0') {
-        if (ip && ip[0] != '\0')
-            snprintf(log_entry, sizeof(log_entry),
-                     "[%s] %s from %s (%s) -> %s\n",
-                     timestamp, message_type, mac, hostname, ip);
-        else
-            snprintf(log_entry, sizeof(log_entry),
-                     "[%s] %s from %s (%s)\n",
-                     timestamp, message_type, mac, hostname);
-    } else {
-        if (ip && ip[0] != '\0')
-            snprintf(log_entry, sizeof(log_entry),
-                     "[%s] %s from %s -> %s\n",
-                     timestamp, message_type, mac, ip);
-        else
-            snprintf(log_entry, sizeof(log_entry),
-                     "[%s] %s from %s\n",
-                     timestamp, message_type, mac);
+    /* Hostname is the only free-form field — strip commas/newlines so it can't
+     * break the CSV column count */
+    char host[256] = "";
+    if (hostname && hostname[0]) {
+        size_t j = 0;
+        for (size_t i = 0; hostname[i] && j < sizeof(host) - 1; i++) {
+            char c = hostname[i];
+            host[j++] = (c == ',' || c == '\n' || c == '\r') ? '_' : c;
+        }
+        host[j] = '\0';
     }
 
-    if (write(fd, log_entry, strlen(log_entry)) < 0)
+    char log_entry[700];
+    int n = snprintf(log_entry, sizeof(log_entry), "%s,%s,%s,%s,%s,%s\n",
+                     ts, event,
+                     (mac && mac[0])             ? mac       : "",
+                     (device_id && device_id[0]) ? device_id : "",
+                     host,
+                     (ip && ip[0])               ? ip        : "");
+    if (n > 0 && write(fd, log_entry, (size_t)n) < 0)
         syslog(LOG_WARNING, "Failed to write server log: %s", strerror(errno));
     close(fd);
 }
@@ -234,9 +237,15 @@ int process_dhcp_message(struct dhcp_packet *request,
 /* --------------------------------------------------------------------------
  * parse_dhcp_options
  * -------------------------------------------------------------------------- */
-int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts) {
+int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts,
+                       size_t opt_len) {
     if (!packet || !opts)
         return -1;
+
+    /* Never walk past the end of the options field even if the caller
+     * miscounts; the real cap is whichever is smaller. */
+    if (opt_len > sizeof(packet->options))
+        opt_len = sizeof(packet->options);
 
     memset(opts, 0, sizeof(dhcp_options_t));
 
@@ -251,20 +260,20 @@ int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts) {
         return -1;
     }
 
-    for (size_t i = 0; i < sizeof(packet->options); ) {
+    for (size_t i = 0; i < opt_len; ) {
         uint8_t code = packet->options[i++];
 
         if (code == 0xFF) break;
         if (code == 0x00) continue;
 
-        if (i >= sizeof(packet->options)) {
+        if (i >= opt_len) {
             syslog(LOG_WARNING, "Options parsing ran past end of buffer");
             break;
         }
 
         uint8_t len = packet->options[i++];
 
-        if (i + len > sizeof(packet->options)) {
+        if (i + len > opt_len) {
             syslog(LOG_WARNING, "Option length exceeds buffer bounds");
             break;
         }

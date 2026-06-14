@@ -24,8 +24,11 @@ dhcp/
   src/              Source code
   obj/              Build artifacts (created automatically)
   bin/              The server binary (created automatically)
+  cron_scripts/
+    dhcp-startup    Boot launcher — what `make install` runs at @reboot
   misc/
-    dhcp.conf       Main config — edit this first
+    dhcp.conf.in    Config template (the repo path is stamped in at build time)
+    dhcp.conf       Main config — edit this first (generated from .in by `make`)
     static_list.txt Devices that always get the same IP
     blacklist.txt   Devices that get ignored completely
     members.txt     Who currently has a lease
@@ -107,18 +110,33 @@ Port 67 needs root:
 sudo bin/dhcp_server misc/dhcp.conf
 ```
 
-### 8. Set up the maintenance cron job
+That runs in the foreground — handy for a first test (you'll see it log to the terminal; Ctrl-C to stop). To have it start on boot and keep itself maintained, use `make install` in the next step instead.
 
-This runs nightly to prune any leases that expired without a proper release, rotate the log if it gets big, and clean up old backups:
+It needs root only to bind port 67. To have it drop back to an unprivileged user for the rest of its run, uncomment the `user` line in `misc/dhcp.conf` (set it to whoever owns `misc/`). With that set, a compromise of the daemon no longer hands an attacker root.
+
+### 8. Install it to start at boot (recommended)
 
 ```bash
-sudo crontab -e
+sudo make install
 ```
 
-Add:
+This builds the server and installs two cron jobs under `/etc/cron.d`:
 
+- **`dhcp-startup`** — an `@reboot` entry that launches the server every time the Pi boots.
+- **`dhcp-maintenance`** — runs nightly at 03:00 to prune leases that expired without a clean release, rotate `server.log` if it gets big, and clear out old backups.
+
+Every path is derived from wherever the repo lives, so there's nothing to hand-edit. Reboot to start it automatically, or launch it right now with the same command boot uses:
+
+```bash
+sudo cron_scripts/dhcp-startup
 ```
-0 3 * * * /home/avilo/dhcp/misc/maintence.sh >> /home/avilo/dhcp/misc/refresh.log 2>&1
+
+To change *how* it starts at boot, edit `cron_scripts/dhcp-startup` — the cron entry points back at that file, so changes take effect on the next boot with no reinstall.
+
+To remove both cron jobs:
+
+```bash
+sudo make uninstall
 ```
 
 ---
@@ -145,7 +163,13 @@ tail -f misc/server.log
 cat misc/members.txt
 ```
 
+**Start it (same command boot uses):**
+```bash
+sudo cron_scripts/dhcp-startup
+```
+
 **Stop the server:**
 ```bash
 sudo kill $(cat misc/server.pid)
 ```
+If you installed it with `make install`, this just stops the running process — it'll start again on the next reboot. Run `sudo make uninstall` first if you want it gone for good.
