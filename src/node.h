@@ -59,7 +59,6 @@ typedef int (*tree_visitor_fn)(struct Tree_Node *node, void *ctx);
  * Stops early if fn returns non-zero. */
 void traverse_tree(struct Tree *tree, tree_visitor_fn fn, void *ctx);
 
-void treeprint(struct Tree_Node *, int);
 void deleteTree(struct Tree_Node *);
 
 #endif /* NODE_H */

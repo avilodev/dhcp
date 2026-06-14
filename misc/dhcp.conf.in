@@ -39,3 +39,15 @@ log          @PREFIX@/misc/server.log
 
 # PID file written at startup, removed on clean exit.
 pid          @PREFIX@/misc/server.pid
+
+# ---- Security ---------------------------------------------------------------
+
+# Drop root privileges after binding port 67.  Once set, the server runs as
+# this user instead of root for its entire lifetime, so a compromise of the
+# daemon no longer means a compromise of root.
+#
+# The user MUST be able to read/write the files above (members.txt, server.log,
+# server.pid, static_list.txt, blacklist.txt) — the simplest choice is the
+# owner of this misc/ directory.  Leave commented to keep running as root.
+#
+# user         avilo

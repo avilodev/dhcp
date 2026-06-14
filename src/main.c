@@ -4,6 +4,11 @@
 #include "request.h"
 #include "utils.h"
 #include <pthread.h>
+#include <pwd.h>
+#include <grp.h>
+
+#define MEMBERS_CLEANUP_INTERVAL 3600   /* hourly members.txt self-cleanup */
+#define SWEEP_INTERVAL           60     /* reclaim expired leases on a timer */
 
 /* Each received packet gets copied into a queue slot so the main thread can
  * loop straight back to recvmsg without waiting for a worker to finish. */
@@ -112,6 +117,58 @@ static void remove_pid_file(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * Privilege drop
+ *
+ * Binding port 67 needs root, but nothing afterwards does — the socket is
+ * never rebound, and the runtime files live in a directory the target user
+ * can write to.  So once we're bound we permanently shed root.  This is
+ * opt-in via the `user` config key: with no user set we keep the previous
+ * behaviour of running as whoever launched us.
+ *
+ * Must run while still single-threaded (before the worker pool starts) so the
+ * uid/gid change applies to the whole process.
+ * -------------------------------------------------------------------------- */
+static int drop_privileges(const char *username) {
+    if (!username || !username[0])
+        return 0;                 /* not configured — leave privileges as-is */
+    if (getuid() != 0) {
+        syslog(LOG_INFO, "Not running as root; skipping drop to '%s'", username);
+        return 0;
+    }
+
+    struct passwd *pw = getpwnam(username);
+    if (!pw) {
+        syslog(LOG_ERR, "drop_privileges: unknown user '%s'", username);
+        return -1;
+    }
+
+    if (setgid(pw->pw_gid) != 0) {
+        syslog(LOG_ERR, "drop_privileges: setgid(%d) failed: %s",
+               (int)pw->pw_gid, strerror(errno));
+        return -1;
+    }
+    if (initgroups(pw->pw_name, pw->pw_gid) != 0)
+        syslog(LOG_WARNING, "drop_privileges: initgroups failed: %s",
+               strerror(errno));
+    if (setuid(pw->pw_uid) != 0) {
+        syslog(LOG_ERR, "drop_privileges: setuid(%d) failed: %s",
+               (int)pw->pw_uid, strerror(errno));
+        return -1;
+    }
+
+    /* Refuse to continue if root can be regained — a successful setuid(0) here
+     * means the drop didn't really stick. */
+    if (setuid(0) == 0) {
+        syslog(LOG_ERR, "drop_privileges: still able to regain root — aborting");
+        return -1;
+    }
+
+    syslog(LOG_INFO, "Dropped privileges to '%s' (uid=%d gid=%d)",
+           username, (int)pw->pw_uid, (int)pw->pw_gid);
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
  * Shutdown
  * -------------------------------------------------------------------------- */
 static void cleanup_and_exit(int exit_code) {
@@ -128,41 +185,6 @@ static void cleanup_and_exit(int exit_code) {
     syslog(LOG_INFO, "DHCP server stopped");
     closelog();
     exit(exit_code);
-}
-
-/* --------------------------------------------------------------------------
- * Hex dump helper (debug)
- * -------------------------------------------------------------------------- */
-__attribute__((unused))
-static void print_packet_hex(const char *label, const void *data, size_t len) {
-    const uint8_t *bytes = (const uint8_t *)data;
-    char hex_line[80];
-    int pos;
-
-    syslog(LOG_DEBUG, "=== %s (%zu bytes) ===", label, len);
-
-    for (size_t i = 0; i < len; i += 16) {
-        pos = 0;
-        pos += snprintf(hex_line + pos, sizeof(hex_line) - pos, "%04zx: ", i);
-
-        for (size_t j = 0; j < 16 && (i + j) < len; j++)
-            pos += snprintf(hex_line + pos, sizeof(hex_line) - pos,
-                            "%02x ", bytes[i + j]);
-
-        for (size_t j = (len - i < 16) ? len - i : 16; j < 16; j++)
-            pos += snprintf(hex_line + pos, sizeof(hex_line) - pos, "   ");
-
-        pos += snprintf(hex_line + pos, sizeof(hex_line) - pos, " |");
-        for (size_t j = 0; j < 16 && (i + j) < len; j++) {
-            uint8_t c = bytes[i + j];
-            pos += snprintf(hex_line + pos, sizeof(hex_line) - pos,
-                            "%c", (c >= 32 && c <= 126) ? c : '.');
-        }
-        pos += snprintf(hex_line + pos, sizeof(hex_line) - pos, "|");
-
-        syslog(LOG_DEBUG, "%s", hex_line);
-    }
-    syslog(LOG_DEBUG, "=== End %s ===", label);
 }
 
 /* Workers pull packets from the ring buffer, process them, and send replies.
@@ -190,11 +212,17 @@ static void *worker_thread(void *arg) {
         pthread_cond_signal(&g_queue_notfull);
         pthread_mutex_unlock(&g_queue_mutex);
 
-        /* Parse options before taking any lock — this reads only the packet buffer */
+        /* Parse options before taking any lock — this reads only the packet buffer.
+         * Bound parsing to the bytes actually received so we never interpret the
+         * uninitialised tail of the queue slot as DHCP options. */
         struct dhcp_packet *request = (struct dhcp_packet *)item.buf;
         dhcp_options_t      opts;
 
-        if (parse_dhcp_options(request, &opts) < 0) {
+        size_t header_len = sizeof(struct dhcp_packet) - sizeof(request->options);
+        size_t opt_len    = ((size_t)item.recv_len > header_len)
+                          ? (size_t)item.recv_len - header_len : 0;
+
+        if (parse_dhcp_options(request, &opts, opt_len) < 0) {
             syslog(LOG_WARNING, "Worker: failed to parse DHCP options");
             continue;
         }
@@ -229,10 +257,12 @@ static void *worker_thread(void *arg) {
         /* Log and update the lease file — both happen after the lock drops */
         if (result.req_log[0])
             log_dhcp_interaction(&g_config, result.req_log, result.mac,
+                                 result.device_id[0] ? result.device_id : NULL,
                                  result.hostname[0] ? result.hostname : NULL,
                                  result.req_ip[0]  ? result.req_ip  : NULL);
         if (result.resp_log[0])
             log_dhcp_interaction(&g_config, result.resp_log, result.mac,
+                                 result.device_id[0] ? result.device_id : NULL,
                                  result.hostname[0] ? result.hostname : NULL,
                                  result.resp_ip[0] ? result.resp_ip : NULL);
         if (result.write_lease_db)
@@ -377,22 +407,29 @@ int main(int argc, char **argv) {
         cleanup_and_exit(1);
     }
 
+    /* Shed root now that the privileged port is bound (no-op unless `user` is
+     * configured).  Done before the worker pool starts so it applies process-wide. */
+    if (drop_privileges(g_config.run_as_user) < 0) {
+        fprintf(stderr, "Failed to drop privileges\n");
+        cleanup_and_exit(1);
+    }
+
     syslog(LOG_INFO, "DHCP Server started on port %d", DHCP_SERVER_PORT);
 
-    /* Log startup to server.log */
+    /* Mark startup in server.log (CSV: timestamp,event,mac,client_id,hostname,ip) */
     {
         int log_fd = open(g_config.log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (log_fd >= 0) {
-            char log_msg[256];
             time_t now = time(NULL);
             struct tm tm_buf;
-            struct tm *tm_now = localtime_r(&now, &tm_buf);
-            char timestamp[64];
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_now);
-            snprintf(log_msg, sizeof(log_msg),
-                     "[%s] ===== SERVER STARTED (PID: %d) =====\n",
-                     timestamp, getpid());
-            if (write(log_fd, log_msg, strlen(log_msg)) < 0)
+            char ts[32];
+            if (localtime_r(&now, &tm_buf))
+                strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            else
+                snprintf(ts, sizeof(ts), "0000-00-00 00:00:00");
+            char log_msg[64];
+            int n = snprintf(log_msg, sizeof(log_msg), "%s,SERVER_START,,,,\n", ts);
+            if (n > 0 && write(log_fd, log_msg, (size_t)n) < 0)
                 syslog(LOG_WARNING, "Failed to write startup log: %s", strerror(errno));
             close(log_fd);
         }
@@ -414,6 +451,8 @@ int main(int argc, char **argv) {
     char recv_ctrl[CMSG_SPACE(sizeof(struct in_pktinfo))];
 
     int packet_count = 0;
+    time_t last_members_cleanup = time(NULL);
+    time_t last_sweep           = time(NULL);
 
     while (g_running) {
         /* Hot-reload static assignments and blacklist (under server mutex) */
@@ -433,6 +472,25 @@ int main(int argc, char **argv) {
                    g_config.dump_path ? g_config.dump_path : "(null)");
             pthread_mutex_lock(&g_server_mutex);
             dump_lease_table(&g_config);
+            pthread_mutex_unlock(&g_server_mutex);
+        }
+
+        /* Reclaim expired leases on a wall-clock timer.  The SO_RCVTIMEO branch
+         * below only fires when the network goes idle, so under continuous
+         * traffic this is what keeps expired leases and 60 s OFFER reservations
+         * from accumulating until the pool runs dry. */
+        if (time(NULL) - last_sweep >= SWEEP_INTERVAL) {
+            last_sweep = time(NULL);
+            pthread_mutex_lock(&g_server_mutex);
+            sweep_expired_leases(&g_config);
+            pthread_mutex_unlock(&g_server_mutex);
+        }
+
+        /* Hourly: rewrite members.txt as the current live snapshot (self-clean) */
+        if (time(NULL) - last_members_cleanup >= MEMBERS_CLEANUP_INTERVAL) {
+            last_members_cleanup = time(NULL);
+            pthread_mutex_lock(&g_server_mutex);
+            cleanup_members_database(&g_config);
             pthread_mutex_unlock(&g_server_mutex);
         }
 
@@ -464,7 +522,8 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* SO_RCVTIMEO fired — sweep expired leases */
+                /* Network idle (SO_RCVTIMEO) — sweep now and reset the timer */
+                last_sweep = time(NULL);
                 pthread_mutex_lock(&g_server_mutex);
                 sweep_expired_leases(&g_config);
                 pthread_mutex_unlock(&g_server_mutex);

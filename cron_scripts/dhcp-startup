@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# dhcp-startup — boot launcher for the DHCP server.
+#
+# This is the ONE file you edit to change how the server starts at boot.
+#
+# It runs at boot via /etc/cron.d/dhcp-startup, which `make install` writes to
+# point back at THIS file (`@reboot root <repo>/cron_scripts/dhcp-startup`).
+# Because the cron entry points here, editing this file takes effect on the
+# next boot with no reinstall.
+#
+# The script is self-locating (it derives the repo path from its own location),
+# so it runs unchanged on any machine, from any checkout path.
+
+# cron's @reboot environment is minimal; give ourselves a sane PATH so setsid,
+# date, etc. resolve.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# --- Locate the repo (no hardcoded paths) ----------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+BIN="$REPO/bin/dhcp_server"
+CONF="$REPO/misc/dhcp.conf"
+RUNLOG="$REPO/misc/server.log"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') dhcp-startup: $*" >> "$RUNLOG"; }
+
+if [ ! -x "$BIN" ]; then
+    log "ERROR: server binary missing or not executable: $BIN (did you run 'make'?)"
+    exit 1
+fi
+
+# Start detached from cron's process group (setsid + &) so the server keeps
+# running after this launcher and cron exit. Root is needed only to bind
+# port 67 — the server drops to an unprivileged user itself if `user` is set
+# in dhcp.conf.
+log "starting dhcp_server: $BIN $CONF"
+setsid "$BIN" "$CONF" >> "$RUNLOG" 2>&1 < /dev/null &

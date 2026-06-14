@@ -203,16 +203,6 @@ struct Tree_Node *find_node(struct Tree *tree, const char *key) {
     return NULL;
 }
 
-void treeprint(struct Tree_Node *_head, int level) {
-    if (!_head) return;
-    for (int i = 0; i < level; i++)
-        printf(i == level - 1 ? "|-" : "  ");
-    printf("%u (%d) key=%s\n", _head->value, _head->color,
-           _head->key ? _head->key : "(null)");
-    treeprint(_head->left,  level + 1);
-    treeprint(_head->right, level + 1);
-}
-
 void deleteTree(struct Tree_Node *node) {
     if (!node) return;
     deleteTree(node->left);

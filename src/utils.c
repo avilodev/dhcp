@@ -49,7 +49,10 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
     if (opts && opts->found_client_id) {
         struct Tree_Node *mac_node = find_node(config->mac_table, mac);
         struct Tree_Node *id_node  = find_node(config->mac_table, device_id);
-        if (mac_node && id_node && mac_node != id_node) {
+        /* expires == 0 with a live IP means a static assignment — never wipe it.
+         * Only a stale *dynamic* MAC-keyed lease should be cleaned up here. */
+        if (mac_node && id_node && mac_node != id_node &&
+            mac_node->expires != 0) {
             syslog(LOG_WARNING,
                    "Client-ID collision: MAC %s has different lease than "
                    "Client ID %s", mac, device_id);
@@ -87,7 +90,7 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
 
     /* New device — find a free IP.  Short expiry means if the client goes
      * silent the slot comes back after OFFER_TENTATIVE_SECS seconds. */
-    char *new_ip = find_free_ip(config);
+    char *new_ip = find_free_ip(config, device_id);
     if (new_ip) {
         struct Tree_Node *existing_node = find_node(config->mac_table, device_id);
         if (!existing_node) {
@@ -144,7 +147,7 @@ char *check_static_assignment(const char *mac, dhcp_config_t *config) {
     return NULL;
 }
 
-char *find_free_ip(dhcp_config_t *config) {
+char *find_free_ip(dhcp_config_t *config, const char *device_id) {
     if (!config || !config->start_ip || !config->end_ip || !config->ip_table)
         return NULL;
 
@@ -158,8 +161,15 @@ char *find_free_ip(dhcp_config_t *config) {
 
     uint32_t pool_size = end - start + 1;
 
-    /* Random start so devices can't predict what IP they'll get next time */
-    uint32_t offset = (uint32_t)rand() % pool_size;
+    /* Sticky, deterministic allocation: an identity always probes the pool from
+     * the same offset, so a device that lapses and returns lands back on its old
+     * IP if it's still free.  Replaces the old random offset that scattered a
+     * returning client onto a new address every time.  A randomized MAC is a new
+     * device_id and gets its own slot — we never fingerprint across identities,
+     * so this stays privacy-safe on sensitive networks. */
+    uint32_t offset = (device_id && device_id[0])
+                    ? (hash_string(device_id) % pool_size)
+                    : ((uint32_t)rand() % pool_size);
 
     char *new_ip = malloc(IP_STR_LEN);
     if (!new_ip) return NULL;
@@ -252,66 +262,6 @@ void sweep_expired_leases(dhcp_config_t *config) {
     if (!config || !config->mac_table || !config->ip_table) return;
     sweep_node(config->mac_table->head, config->ip_table, time(NULL));
     syslog(LOG_DEBUG, "Expired lease sweep complete");
-}
-
-bool is_ip_available(const char *ip, dhcp_config_t *config) {
-    return !test_ip(config->ip_table, (char *)ip);
-}
-
-bool validate_mac_address(const char *mac) {
-    if (!mac) return false;
-    int parts[6];
-    int matched = sscanf(mac,
-        "%02X:%02X:%02X:%02X:%02X:%02X",
-        &parts[0], &parts[1], &parts[2],
-        &parts[3], &parts[4], &parts[5]);
-    if (matched != 6)
-        matched = sscanf(mac,
-            "%02x:%02x:%02x:%02x:%02x:%02x",
-            &parts[0], &parts[1], &parts[2],
-            &parts[3], &parts[4], &parts[5]);
-    return matched == 6;
-}
-
-char *format_timestamp(time_t t) {
-    struct tm tm_buf;
-    struct tm *tm = gmtime_r(&t, &tm_buf);
-    if (!tm) return NULL;
-    char *str = malloc(64);
-    if (str && strftime(str, 64, "%a, %d %b %Y %H:%M:%S GMT", tm) == 0) {
-        free(str);
-        return NULL;
-    }
-    return str;
-}
-
-time_t parse_timestamp(const char *str) {
-    if (!str) return 0;
-    struct tm tm = {0};
-    char *result = strptime(str, "%a, %d %b %Y %H:%M:%S GMT", &tm);
-    if (!result) return 0;
-#ifdef __USE_MISC
-    return timegm(&tm);
-#else
-    time_t t = mktime(&tm);
-    if (t == -1) return 0;
-    struct tm *local = localtime(&t);
-    if (!local) return 0;
-    time_t local_t = mktime(local);
-    return t + (t - local_t);
-#endif
-}
-
-uint32_t ip_string_to_uint32(const char *ip) {
-    if (!ip) return 0;
-    return inet_addr(ip);
-}
-
-void uint32_to_ip_string(uint32_t ip, char *buf, size_t buflen) {
-    if (!buf || buflen == 0) return;
-    struct in_addr addr;
-    addr.s_addr = ip;
-    inet_ntop(AF_INET, &addr, buf, (socklen_t)buflen);
 }
 
 void format_mac_address(const uint8_t *mac, char *buf, size_t buflen) {

@@ -8,7 +8,9 @@ misc/server.pid
 misc/server.log
 misc/refresh.log
 misc/backups/
+misc/logs/
 misc/*.tmp
+misc/*.lock
 
 # Generated config (built from misc/dhcp.conf.in by `make`)
 misc/dhcp.conf

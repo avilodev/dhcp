@@ -122,6 +122,7 @@ typedef struct {
     struct Tree *blacklist;
     int          num_workers; /* thread pool size (default DEFAULT_WORKERS) */
     char        *dump_path;   /* path for SIGUSR1 lease dump output */
+    char        *run_as_user; /* drop to this user after bind; NULL = stay as-is */
 } dhcp_config_t;
 
 /* Lease Information */
