@@ -76,6 +76,11 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
     memset(resp, 0, sizeof(*resp));
     fill_common_fields(resp, req);
 
+    /* RFC 2131 Table 3: an OFFER carries ciaddr = 0.  fill_common_fields echoes
+     * the request's ciaddr (correct for ACK), so clear it back for OFFER. */
+    if (msg_type == DHCPOFFER)
+        resp->ciaddr = 0;
+
     char mac_str[MAC_STR_LEN];
     format_mac_address(req->chaddr, mac_str, sizeof(mac_str));
 
@@ -117,15 +122,19 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
         ADD_OPTION_U32(28, bcast);
     }
 
-    /* Option 15: Domain name */
+    /* Option 15: Domain name (option length field caps at 255) */
     const char *domain = config->domain_name ? config->domain_name : "";
-    if (domain[0] != '\0')
-        ADD_OPTION(15, strlen(domain), domain);
+    if (domain[0] != '\0') {
+        size_t dlen = strlen(domain);
+        if (dlen > 255) dlen = 255;
+        ADD_OPTION(15, dlen, domain);
+    }
 
-    /* Option 12: Hostname — echo client's or generate a default */
+    /* Option 12: Hostname — echo client's or generate a default.
+     * strlen of a char[256] is at most 255, so the uint8_t length is exact. */
     if (opts->found_hostname && opts->hostname[0] != '\0') {
         uint8_t hn = (uint8_t)strlen(opts->hostname);
-        if (hn > 0 && hn < 64) ADD_OPTION(12, hn, opts->hostname);
+        if (hn > 0) ADD_OPTION(12, hn, opts->hostname);
     } else {
         char dflt[64];
         const char *pfx = (domain[0] != '\0') ? domain : "dhcp";
@@ -137,13 +146,28 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
     /* Lease time (opt 51), renewal time T1 at 50% (opt 58), rebind time T2 at 87.5% (opt 59) */
     ADD_OPTION_U32(51, htonl(config->lease_time));
     ADD_OPTION_U32(58, htonl(config->lease_time / 2));
-    ADD_OPTION_U32(59, htonl((config->lease_time * 7) / 8));
+    ADD_OPTION_U32(59, htonl((uint32_t)(((uint64_t)config->lease_time * 7) / 8)));
 
-    /* Send any optional options the client explicitly asked for */
+    /* Send any optional options the client explicitly asked for (once each) */
+    bool sent_ntp = false;
     for (int i = 0; i < opts->parameter_list_len; i++) {
         switch (opts->parameter_list[i]) {
             case 28: break;  /* broadcast address — already sent above */
-            case 42: ADD_OPTION_U32(42, server); break;  /* NTP — point at ourselves */
+            case 42:         /* NTP servers — only if configured, sent once */
+                if (sent_ntp) break;
+                sent_ntp = true;
+                if (config->ntp_count > 0) {
+                    uint8_t ntp_buf[16];
+                    int ntp_len = 0;
+                    for (int j = 0; j < config->ntp_count && j < 4; j++) {
+                        if (!config->ntp_servers[j]) continue;
+                        uint32_t n = inet_addr(config->ntp_servers[j]);
+                        memcpy(ntp_buf + ntp_len, &n, 4);
+                        ntp_len += 4;
+                    }
+                    if (ntp_len > 0) ADD_OPTION(42, ntp_len, ntp_buf);
+                }
+                break;
         }
     }
 
@@ -252,19 +276,37 @@ int build_inform_ack(struct dhcp_packet *resp, struct dhcp_packet *req,
         NOADDR_U32(28, bcast);
     }
 
-    /* Option 15: Domain name */
+    /* Option 15: Domain name (option length field caps at 255) */
     const char *domain = config->domain_name ? config->domain_name : "";
-    if (domain[0] != '\0' && opt + 2 + strlen(domain) <= opt_end) {
+    size_t dlen = strlen(domain);
+    if (dlen > 255) dlen = 255;
+    if (dlen > 0 && opt + 2 + dlen <= opt_end) {
         *opt++ = 15;
-        *opt++ = (uint8_t)strlen(domain);
-        memcpy(opt, domain, strlen(domain));
-        opt += strlen(domain);
+        *opt++ = (uint8_t)dlen;
+        memcpy(opt, domain, dlen);
+        opt += dlen;
     }
 
-    /* Send any optional options the client asked for */
+    /* NTP servers (option 42) — only if configured and requested, sent once */
+    bool sent_ntp = false;
     for (int i = 0; i < opts->parameter_list_len; i++) {
-        switch (opts->parameter_list[i]) {
-            case 42: NOADDR_U32(42, server); break;  /* NTP */
+        if (opts->parameter_list[i] != 42 || sent_ntp) continue;
+        sent_ntp = true;
+        if (config->ntp_count > 0) {
+            uint8_t ntp_buf[16];
+            int ntp_len = 0;
+            for (int j = 0; j < config->ntp_count && j < 4; j++) {
+                if (!config->ntp_servers[j]) continue;
+                uint32_t n = inet_addr(config->ntp_servers[j]);
+                memcpy(ntp_buf + ntp_len, &n, 4);
+                ntp_len += 4;
+            }
+            if (ntp_len > 0 && opt + 2 + ntp_len <= opt_end) {
+                *opt++ = 42;
+                *opt++ = (uint8_t)ntp_len;
+                memcpy(opt, ntp_buf, ntp_len);
+                opt += ntp_len;
+            }
         }
     }
 

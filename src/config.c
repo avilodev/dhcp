@@ -50,6 +50,13 @@ static int parse_config_file(const char *path, dhcp_config_t *config) {
                 config->dns_count++;
             }
         }
+        else if (strcmp(key, "ntp") == 0) {
+            if (config->ntp_count < 4) {
+                free(config->ntp_servers[config->ntp_count]);
+                config->ntp_servers[config->ntp_count] = strdup(value);
+                config->ntp_count++;
+            }
+        }
         else {
             syslog(LOG_WARNING, "dhcp.conf: unknown key '%s'", key);
         }
@@ -143,6 +150,14 @@ int init_config(int argc, char **argv) {
             return -1;
         }
     }
+    for (int i = 0; i < g_config.ntp_count; i++) {
+        if (!validate_ip_address(g_config.ntp_servers[i])) {
+            fprintf(stderr, "Error: Invalid ntp address in configuration: %s\n",
+                    g_config.ntp_servers[i] ? g_config.ntp_servers[i] : "(null)");
+            cleanup_config();
+            return -1;
+        }
+    }
 
     syslog(LOG_INFO, "Configuration:");
     syslog(LOG_INFO, "  IP range  : %s – %s", g_config.start_ip, g_config.end_ip);
@@ -174,6 +189,12 @@ void cleanup_config(void) {
         g_config.dns_servers[i] = NULL;
     }
     g_config.dns_count = 0;
+
+    for (int i = 0; i < 4; i++) {
+        free(g_config.ntp_servers[i]);
+        g_config.ntp_servers[i] = NULL;
+    }
+    g_config.ntp_count = 0;
 
     if (g_config.ip_table)  { free_trie(g_config.ip_table);      g_config.ip_table  = NULL; }
     if (g_config.mac_table) { destroy_tree(g_config.mac_table);   g_config.mac_table = NULL; }
