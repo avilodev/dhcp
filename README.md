@@ -6,12 +6,16 @@ A DHCP server written in C that runs on a Raspberry Pi. It was built from scratc
 
 ## What it does
 
-When a device connects to the network it asks "can I get an IP address?" The server picks a random free address from the pool and hands it out. It keeps track of who has what in `members.txt` — one line per device, always up to date. When a device leaves cleanly the entry is removed. Simple.
+When a device connects to the network it asks "can I get an IP address?" The server picks a free address from the pool and hands it out. Every lease change is written as one line to `leases.journal`, and `members.txt` always shows who has what right now — one line per device. When a device leaves cleanly the entry is removed. Simple.
+
+It can also run as a **cluster** of several servers that share one view of every lease, so losing a box doesn't take the network down. See [CLUSTER.md](CLUSTER.md).
 
 A few things worth knowing about how it works under the hood:
 
-- **IPs are assigned randomly**, not sequentially. This means an attacker watching traffic can't trivially map out the rest of your pool.
-- **`members.txt` is not a log file.** It only contains currently active leases. One line per device. Updated on each renewal, removed on release.
+- **IPs are sticky, not sequential.** Each device starts searching the pool from a spot derived from its own ID, so a device that comes back usually gets its old address again, and addresses don't line up in join order.
+- **`leases.journal` is the database** — a plain text file, one line per lease change, appended and `fsync`ed before the client gets its ACK, so a power cut can't lose a lease. It's compacted hourly.
+- **`members.txt` is not a log file.** It's rebuilt from memory whenever something changes: currently active leases plus every static assignment, sorted by IP, with when each lease expires.
+- **It checks an address is free before offering it.** A new device's first offer waits half a second while the server asks the network (ARP) whether anything already uses that address. If something does, the server logs its MAC, holds the address back and offers the next one.
 - **It knows which interface a packet came in on** and replies on the same one. This matters on a Pi with multiple network interfaces — without this, replies can go out the wrong port.
 - **Worker threads** handle packets in parallel so a slow client never holds up the rest. All the shared state is locked tightly — only for as long as needed.
 
@@ -22,20 +26,25 @@ A few things worth knowing about how it works under the hood:
 ```
 dhcp/
   src/              Source code
+  tests/            End-to-end tests (`make test`, no sudo needed)
   obj/              Build artifacts (created automatically)
   bin/              The server binary (created automatically)
   cron_scripts/
     dhcp-startup    Boot launcher — what `make install` runs at @reboot
   misc/
     dhcp.conf.in    Config template (the repo path is stamped in at build time)
-    dhcp.conf       Main config — edit this first (generated from .in by `make`)
+    dhcp.conf       Main config — edit this first (created from .in by the first
+                    `make`; never overwritten after that — `make config-diff`
+                    shows options added to the template since)
     static_list.txt Devices that always get the same IP
     blacklist.txt   Devices that get ignored completely
-    members.txt     Who currently has a lease
+    leases.journal  The lease database — one line per lease change (append-only)
+    members.txt     Who currently has a lease (rebuilt from the journal)
+    cluster.conf.example  Template for cluster mode (see CLUSTER.md)
     server.log      What the server has been doing
     server.pid      The running server's process ID
     maintence.sh    Nightly cleanup script
-    backups/        Daily backups of members.txt and server.log
+    backups/        Daily backups of the journal, members.txt and server.log
 ```
 
 ---
@@ -46,7 +55,7 @@ dhcp/
 
 ```bash
 sudo apt update
-sudo apt install gcc make
+sudo apt install gcc make libssl-dev
 ```
 
 ### 2. Build
@@ -161,6 +170,12 @@ tail -f misc/server.log
 **See who currently has a lease:**
 ```bash
 cat misc/members.txt
+```
+Columns: `device_id,mac,ip,hostname,expires,node`. `node` is which server issued the lease.
+
+**Compact the journal now (it happens hourly anyway):**
+```bash
+sudo kill -USR2 $(cat misc/server.pid)
 ```
 
 **Start it (same command boot uses):**

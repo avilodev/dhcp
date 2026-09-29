@@ -1,0 +1,58 @@
+# DHCP Server Configuration
+# Lines beginning with '#' are comments.
+# Restart the server after making changes.
+
+# ---- Network Settings -------------------------------------------------------
+
+server_ip    192.168.1.2
+start_ip     192.168.1.10
+end_ip       192.168.1.254
+subnet_mask  255.255.255.0
+gateway      192.168.1.1
+
+# DNS servers — one entry per line, up to 4.
+dns          192.168.1.2
+dns          192.168.1.3
+
+# NTP servers (Option 42) — one entry per line, up to 4.  Only sent to clients
+# that request it, and only if at least one is listed here.  Leave commented to
+# advertise no NTP server.
+# ntp          192.168.1.1
+
+# Domain name sent to clients as Option 15 (DNS search domain).
+domain       avilo
+
+# Lease time in seconds (86400 = 24 hours).
+lease_time   86400
+
+# ---- Runtime File Paths -----------------------------------------------------
+
+# Active lease database — one entry per active device, written on DHCPACK,
+# removed on DHCPRELEASE.
+lease_db     /home/avilo/dhcp/misc/members.txt
+
+# Static MAC-to-IP assignments.
+# Format (one entry per line):  <label>  <MAC>  <IP>
+# Example:  mydevice  AA:BB:CC:DD:EE:FF  192.168.1.5
+static       /home/avilo/dhcp/misc/static_list.txt
+
+# MAC address blacklist — one MAC per line, no response sent to listed MACs.
+blacklist    /home/avilo/dhcp/misc/blacklist.txt
+
+# Readable interaction log.
+log          /home/avilo/dhcp/misc/server.log
+
+# PID file written at startup, removed on clean exit.
+pid          /home/avilo/dhcp/misc/server.pid
+
+# ---- Security ---------------------------------------------------------------
+
+# Drop root privileges after binding port 67.  Once set, the server runs as
+# this user instead of root for its entire lifetime, so a compromise of the
+# daemon no longer means a compromise of root.
+#
+# The user MUST be able to read/write the files above (members.txt, server.log,
+# server.pid, static_list.txt, blacklist.txt) — the simplest choice is the
+# owner of this misc/ directory.  Leave commented to keep running as root.
+#
+# user         avilo

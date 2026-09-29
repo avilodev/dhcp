@@ -1,0 +1,48 @@
+# cluster.conf — shared by every member of a DHCP cluster.
+#
+# Copy to misc/cluster/cluster.conf.  With a controller you edit it ONLY on the
+# controller and `kill -HUP` it (or run `bin/dhcp_server --ctl misc/dhcp.conf
+# push`); it's pushed to every node.  Without a controller, keep an identical
+# copy on every node.  The shared static list and blacklist live next to it
+# (misc/cluster/static_list.txt, misc/cluster/blacklist.txt).
+
+# ---- Members --------------------------------------------------------------
+# node|controller  <id>  <ip>  [peer port, default: peer_port]
+# The id must match that server's node_id in its own dhcp.conf.
+#
+# Several nodes can run on one machine: give each its own id and peer port and
+# let them share the machine's address (`make instance ID=A2` sets one up).
+# DHCP itself is always port 67 — the peer port is only for server-to-server
+# traffic.  The controller can share a machine too (it never uses port 67).
+#
+# This example: three nodes on one Pi, one on another, controller on the first.
+node        A    192.168.1.2          # Pi #1 (main misc/dhcp.conf)
+node        A2   192.168.1.2   648    # Pi #1, misc/instances/A2
+node        A3   192.168.1.2   649    # Pi #1, misc/instances/A3
+node        B    192.168.1.3          # Pi #2
+controller  C    192.168.1.2   6700   # Pi #1, misc/instances/C (ROLE=controller)
+
+# ---- Shared DHCP settings -------------------------------------------------
+start_ip     192.168.1.10
+end_ip       192.168.1.254
+subnet_mask  255.255.255.0
+gateway      192.168.1.1
+dns          192.168.1.2
+dns          192.168.1.3
+domain       avilo
+lease_time   86400
+
+# ---- Failover ---------------------------------------------------------------
+# While any node is unreachable, leases are capped at mclt seconds, so any
+# disagreement between nodes heals within that time.
+mclt         3600
+
+# Seconds without a heartbeat before a peer counts as down (its clients move
+# to the survivors).
+peer_timeout 10
+
+# Seconds a peer must be down before a node declares it partner-down on its
+# own and starts using the dead node's share of the pool.  0 = never (an
+# operator runs `--ctl ... partner-down <id>`).  Only use this on unattended
+# sites and with a long value: a node you can't reach might still be running.
+auto_partner_down 0

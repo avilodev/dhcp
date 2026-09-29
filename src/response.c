@@ -72,7 +72,8 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
                                   dhcp_options_t *opts,
                                   dhcp_config_t *config,
                                   size_t *pkt_len,
-                                  uint8_t msg_type) {
+                                  uint8_t msg_type,
+                                  uint32_t lease_secs) {
     memset(resp, 0, sizeof(*resp));
     fill_common_fields(resp, req);
 
@@ -144,9 +145,9 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
     }
 
     /* Lease time (opt 51), renewal time T1 at 50% (opt 58), rebind time T2 at 87.5% (opt 59) */
-    ADD_OPTION_U32(51, htonl(config->lease_time));
-    ADD_OPTION_U32(58, htonl(config->lease_time / 2));
-    ADD_OPTION_U32(59, htonl((uint32_t)(((uint64_t)config->lease_time * 7) / 8)));
+    ADD_OPTION_U32(51, htonl(lease_secs));
+    ADD_OPTION_U32(58, htonl(lease_secs / 2));
+    ADD_OPTION_U32(59, htonl((uint32_t)(((uint64_t)lease_secs * 7) / 8)));
 
     /* Send any optional options the client explicitly asked for (once each) */
     bool sent_ntp = false;
@@ -188,14 +189,16 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
 
 int build_offer(struct dhcp_packet *resp, struct dhcp_packet *req,
                 dhcp_options_t *opts, dhcp_config_t *config,
-                size_t *pkt_len) {
-    return build_offer_ack_common(resp, req, opts, config, pkt_len, DHCPOFFER);
+                size_t *pkt_len, uint32_t lease_secs) {
+    return build_offer_ack_common(resp, req, opts, config, pkt_len, DHCPOFFER,
+                                  lease_secs);
 }
 
 int build_ack(struct dhcp_packet *resp, struct dhcp_packet *req,
               dhcp_options_t *opts, dhcp_config_t *config,
-              size_t *pkt_len) {
-    return build_offer_ack_common(resp, req, opts, config, pkt_len, DHCPACK);
+              size_t *pkt_len, uint32_t lease_secs) {
+    return build_offer_ack_common(resp, req, opts, config, pkt_len, DHCPACK,
+                                  lease_secs);
 }
 
 int build_nak(struct dhcp_packet *resp, struct dhcp_packet *req,
