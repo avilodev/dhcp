@@ -56,6 +56,20 @@
 #define PID_FILE            "/misc/server.pid"
 #define SERVER_LOG_FILE     "/misc/server.log"
 #define DUMP_FILE           "/misc/leases_current.txt"
+#define JOURNAL_FILE        "/misc/leases.journal"
+
+/* Cluster defaults */
+#ifndef NODE_ID_LEN
+#define NODE_ID_LEN         16      /* max id length incl. NUL: [A-Za-z0-9_-]{1,15} */
+#endif
+#define MAX_MEMBERS         16      /* nodes + controllers in one cluster */
+#define DEFAULT_PEER_PORT   647     /* the port ISC's failover protocol used */
+#define DEFAULT_MCLT        3600    /* lease cap while a peer is unreachable */
+#define DEFAULT_PEER_TIMEOUT 10     /* seconds without a heartbeat → peer down */
+#define DEFAULT_PROBE_MS    500     /* how long to wait for a conflict-check answer */
+
+#define ROLE_NODE           0       /* answers DHCP */
+#define ROLE_CONTROLLER     1       /* owns shared config; never answers DHCP */
 
 /* Thread pool defaults */
 #define DEFAULT_WORKERS     4
@@ -125,7 +139,33 @@ typedef struct {
     int          num_workers; /* thread pool size (default DEFAULT_WORKERS) */
     char        *dump_path;   /* path for SIGUSR1 lease dump output */
     char        *run_as_user; /* drop to this user after bind; NULL = stay as-is */
+
+    /* Lease journal (source of truth; members.txt is derived from it) */
+    char        *journal_path;
+    struct Tree *ip_owner;    /* ip string → key of the lease-tree node holding it */
+
+    /* Cluster mode — enabled when node_id is set.  Unset = single server. */
+    char        *node_id;
+    int          role;            /* ROLE_NODE / ROLE_CONTROLLER */
+    char        *cluster_dir;     /* cluster.conf + shared static/blacklist */
+    char        *controller_ip;   /* where to pull shared config from (optional) */
+    int          controller_port;
+    char        *peer_key_path;
+    int          peer_port;
+    uint32_t     mclt;
+    uint32_t     peer_timeout;
+    uint32_t     auto_partner_down; /* 0 = never declare a peer down on our own */
+    char        *conf_path;       /* the dhcp.conf we were started with */
+    int          probe_timeout_ms; /* conflict check before a fresh offer; 0 = off */
 } dhcp_config_t;
+
+/* One line of cluster.conf:  node|controller  <id>  <ip>  [port] */
+typedef struct {
+    char id[NODE_ID_LEN];
+    char ip[IP_STR_LEN];
+    int  port;
+    int  role;
+} cluster_member_t;
 
 /* Lease Information */
 typedef struct {

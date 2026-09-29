@@ -8,6 +8,7 @@
 #include "utils.h"
 #include "lease.h"
 #include "response.h"
+#include "ha.h"
 
 /*
  * Carries logging and lease-write state out of process_dhcp_message so
@@ -22,9 +23,16 @@ typedef struct {
     char req_ip[IP_STR_LEN]; /* IP for request log entry, or "" (e.g. REQUEST) */
     char resp_log[32];       /* message type string for response log entry, or "" */
     char resp_ip[IP_STR_LEN];/* IP for response log entry (offered / confirmed) */
-    bool write_lease_db;     /* true → call update_lease_database after unlock */
-    bool remove_lease_db;    /* true → call remove_lease_from_database after unlock */
+    lease_commit_t commit;   /* journal line to fsync + send to peers after unlock */
+    char forward_to[NODE_ID_LEN]; /* hand the packet to this sibling instead of answering */
+    char probe_ip[IP_STR_LEN];    /* a fresh address in this OFFER: check it's free first */
 } dhcp_result_t;
+
+/* How a packet reached us */
+typedef struct {
+    bool broadcast;   /* sent to a broadcast address — every node got a copy */
+    bool forwarded;   /* handed over by a sibling on our address: it's ours to answer */
+} dhcp_rx_t;
 
 void log_dhcp_interaction(dhcp_config_t *config, const char *event,
                           const char *mac, const char *device_id,
@@ -34,7 +42,8 @@ int process_dhcp_message(struct dhcp_packet *request,
                         dhcp_options_t *opts,
                         dhcp_config_t *config,
                         size_t *pkt_len,
-                        dhcp_result_t *result);
+                        dhcp_result_t *result,
+                        const dhcp_rx_t *rx);
 /* opt_len is the number of option bytes actually received (packet length minus
  * the fixed header), so parsing never reads past the end of the real packet. */
 int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts,

@@ -35,6 +35,17 @@ struct Tree_Node *add_tree_node(struct Tree *tree, const char *key,
     node->ip       = ip;
     node->hostname = NULL;
     node->expires  = expires;
+    node->mac      = NULL;
+    node->bound      = false;
+    node->is_static  = false;
+    node->is_decline = false;
+    node->unverified = false;
+    node->origin[0]  = '\0';
+    node->seq        = 0;
+    node->rec_time   = 0;
+    node->rec_op     = 0;
+    node->rec_ip[0]  = '\0';
+    node->rec_expires = 0;
     node->chain    = NULL;
     node->left     = NULL;
     node->right    = NULL;
@@ -215,6 +226,7 @@ void deleteTree(struct Tree_Node *node) {
         free(chain->key);
         free(chain->ip);
         free(chain->hostname);
+        free(chain->mac);
         free(chain);
         chain = next;
     }
@@ -222,6 +234,7 @@ void deleteTree(struct Tree_Node *node) {
     free(node->key);
     free(node->ip);
     free(node->hostname);
+    free(node->mac);
     free(node);
 }
 

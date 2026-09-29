@@ -4,6 +4,10 @@
 #
 # This is the ONE file you edit to change how the server starts at boot.
 #
+# It starts the main server (misc/dhcp.conf) plus every extra instance in
+# misc/instances/*/dhcp.conf, skipping any that are already running — so it's
+# also safe to run by hand after adding an instance.
+#
 # It runs at boot via /etc/cron.d/dhcp-startup, which `make install` writes to
 # point back at THIS file (`@reboot root <repo>/cron_scripts/dhcp-startup`).
 # Because the cron entry points here, editing this file takes effect on the
@@ -32,9 +36,30 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-# Start detached from cron's process group (setsid + &) so the server keeps
-# running after this launcher and cron exit. Root is needed only to bind
-# port 67 — the server drops to an unprivileged user itself if `user` is set
-# in dhcp.conf.
-log "starting dhcp_server: $BIN $CONF"
-setsid "$BIN" "$CONF" >> "$RUNLOG" 2>&1 < /dev/null &
+# Start one server unless its pid file points at a live process.  Detached from
+# cron's process group (setsid + &) so it keeps running after this launcher and
+# cron exit. Root is needed only to bind port 67 (and 647) — the server drops to
+# an unprivileged user itself if `user` is set in its config.
+launch() {
+    local conf="$1" pidfile runlog pid
+    pidfile=$(awk '$1 == "pid" { print $2 }' "$conf" | tail -1)
+    runlog=$(awk '$1 == "log" { print $2 }' "$conf" | tail -1)
+    runlog="${runlog:-$RUNLOG}"
+    if [ -n "$pidfile" ] && [ -f "$pidfile" ]; then
+        pid=$(cat "$pidfile")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "already running (pid $pid): $conf"
+            return
+        fi
+    fi
+    log "starting dhcp_server: $BIN $conf"
+    echo "starting: $conf"
+    setsid "$BIN" "$conf" >> "$runlog" 2>&1 < /dev/null &
+}
+
+# The main server, then every extra cluster node on this machine
+# (misc/instances/<ID>/dhcp.conf — created by `make instance`)
+launch "$CONF"
+for inst in "$REPO"/misc/instances/*/dhcp.conf; do
+    [ -f "$inst" ] && launch "$inst"
+done

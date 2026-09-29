@@ -25,11 +25,23 @@ domain       avilo
 # Lease time in seconds (86400 = 24 hours).
 lease_time   86400
 
+# Conflict check: before offering an address for the first time, ask the
+# network whether anything already uses it (an ARP probe — every device has to
+# answer that, even ones that ignore ping; relayed clients get a ping).  If
+# something answers, the address is held back and the next one is offered.
+# Costs this long once, on a new device's first offer.  0 turns it off.
+probe_timeout_ms 500
+
 # ---- Runtime File Paths -----------------------------------------------------
 
-# Active lease database — one entry per active device, written on DHCPACK,
-# removed on DHCPRELEASE.
+# Who has what right now — one line per active lease plus every static
+# assignment, sorted by IP.  Rebuilt from the journal (below); safe to read,
+# don't edit it.  Columns: device_id,mac,ip,hostname,expires,node
 lease_db     @PREFIX@/misc/members.txt
+
+# Lease journal — the real database.  An append-only text log: one line per
+# lease change, compacted hourly (or on SIGUSR2).  Survives power cuts.
+journal      @PREFIX@/misc/leases.journal
 
 # Static MAC-to-IP assignments.
 # Format (one entry per line):  <label>  <MAC>  <IP>
@@ -56,3 +68,17 @@ pid          @PREFIX@/misc/server.pid
 # owner of this misc/ directory.  Leave commented to keep running as root.
 #
 # user         avilo
+
+# ---- Cluster (multi-server) ---------------------------------------------------
+#
+# Leave node_id commented to run as a single server (everything above is all
+# you need).  Setting node_id turns on cluster mode — see CLUSTER.md.  In
+# cluster mode the pool, gateway, dns, ntp, domain, lease_time and the static
+# list / blacklist come from cluster_dir instead of this file.
+#
+# node_id      A                           # unique per server: 1-15 of A-Z a-z 0-9 _ -
+# role         node                        # node | controller (or run with --controller)
+# cluster_dir  @PREFIX@/misc/cluster       # cluster.conf + shared static/blacklist
+# controller   192.168.1.4                 # optional: pull cluster_dir from the controller
+# peer_key     @PREFIX@/misc/peer.key      # shared secret (make peer-key); same on every member
+# peer_port    647

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
@@ -13,6 +14,10 @@
 
 #define MAXLINE 4096
 
+#ifndef NODE_ID_LEN
+#define NODE_ID_LEN 16          /* cluster node id, incl. NUL */
+#endif
+
 struct Tree_Node
 {
     uint32_t value;           /* DJB2 hash — BST ordering key */
@@ -20,6 +25,23 @@ struct Tree_Node
     char    *ip;
     char    *hostname;        /* last-seen DHCP hostname / static device label */
     time_t   expires;         /* 0 = no expiry; otherwise Unix timestamp */
+    char    *mac;             /* hardware address last seen for this device */
+
+    /* Live state */
+    bool     bound;           /* ACKed lease (false = tentative OFFER / none) */
+    bool     is_static;       /* from static_list.txt — never expires/journaled */
+    bool     is_decline;      /* "!decline/<ip>" placeholder holding a declined IP */
+    bool     unverified;      /* fresh offer: not yet checked for a conflict */
+
+    /* The latest journal record for this key — what compaction and peer
+     * catch-up re-emit, and what "is this incoming record newer?" compares
+     * against.  rec_op == 0 means no record yet. */
+    char     origin[NODE_ID_LEN];
+    uint64_t seq;
+    time_t   rec_time;
+    uint8_t  rec_op;
+    char     rec_ip[16];
+    time_t   rec_expires;
 
     struct Tree_Node *chain;  /* singly-linked list of nodes sharing this hash */
     struct Tree_Node *left;

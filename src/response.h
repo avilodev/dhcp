@@ -8,13 +8,15 @@
 #include "types.h"
 #include "utils.h"
 
+/* lease_secs: the lease to grant — normally lease_time, shorter (MCLT) while
+ * a cluster peer is unreachable */
 int build_offer(struct dhcp_packet *resp, struct dhcp_packet *req,
                 dhcp_options_t *opts, dhcp_config_t *config,
-                size_t *pkt_len);
+                size_t *pkt_len, uint32_t lease_secs);
 
 int build_ack(struct dhcp_packet *resp, struct dhcp_packet *req,
               dhcp_options_t *opts, dhcp_config_t *config,
-              size_t *pkt_len);
+              size_t *pkt_len, uint32_t lease_secs);
 
 int build_nak(struct dhcp_packet *resp, struct dhcp_packet *req,
               dhcp_config_t *config, size_t *pkt_len);

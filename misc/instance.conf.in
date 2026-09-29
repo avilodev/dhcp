@@ -1,0 +1,29 @@
+# Cluster @ROLE@ @ID@ — an extra server on this machine.
+# Created by `make instance`; edit freely.  See CLUSTER.md, "Several servers
+# on one machine".
+#
+# The pool, gateway, dns, lease time, static list and blacklist all come from
+# cluster_dir/cluster.conf, shared with the rest of the cluster.
+
+# The machine's address.  Every server on this machine can share it: the
+# kernel gives each of them every broadcast, and the servers hand relayed
+# packets to whichever of them owns the client.  (A separate address works
+# too — it just has to be assigned to this machine.)
+server_ip    @IP@
+
+node_id      @ID@
+role         @ROLE@
+peer_port    @PORT@
+peer_key     @PREFIX@/misc/peer.key
+cluster_dir  @CLUSTER_DIR@
+@CONTROLLER_LINE@
+
+# Runtime files — each instance keeps its own
+lease_db     @DIR@/members.txt
+journal      @DIR@/leases.journal
+log          @DIR@/server.log
+pid          @DIR@/server.pid
+dump         @DIR@/leases_current.txt
+
+# Drop root after binding (same as the main dhcp.conf)
+# user         avilo
