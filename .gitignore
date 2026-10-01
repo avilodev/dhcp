@@ -25,3 +25,8 @@ misc/dhcp.conf
 
 # Test bytecode
 tests/__pycache__/
+# Backups and per-site device data
+*.old
+*.log
+misc/static_list.txt
+misc/blacklist.txt
