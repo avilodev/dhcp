@@ -4,24 +4,24 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <stdbool.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <sys/types.h>
-#include <sys/socket.h> 
+#include <netinet/in.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <syslog.h>
 
-#include "types.h" 
+#include "lease.h"
 #include "node.h"
 #include "trie.h"
-#include "lease.h"
+#include "types.h"
 
 typedef struct {
-    const char *conf_path;    /* NULL = built-in default path */
-    const char *node_id;      /* --node-id overrides dhcp.conf */
-    bool        controller;   /* --controller */
+	const char *conf_path; // NULL = built-in default path
+	const char *node_id;   // --node-id overrides dhcp.conf
+	bool controller;	   // --controller
 } cli_options_t;
 
 int init_config(const cli_options_t *opts);

@@ -1,428 +1,440 @@
 #include "request.h"
 
-/* One CSV record per call:  timestamp,event,mac,client_id,hostname,ip
- * Empty fields are left blank (e.g. no IP yet on a DISCOVER).  Mirrors the
- * DNS server's server.log convention so the same tooling parses both. */
+// One CSV record per call: timestamp,event,mac,client_id,hostname,ip Empty
 void log_dhcp_interaction(dhcp_config_t *config, const char *event,
-                          const char *mac, const char *device_id,
-                          const char *hostname, const char *ip) {
-    if (!config || !config->log_path || !event) return;
+						  const char *mac, const char *device_id,
+						  const char *hostname, const char *ip) {
+	if(!config || !config->log_path || !event)
+		return;
 
-    int fd = open(config->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
+	int fd = open(config->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if(fd < 0)
+		return;
 
-    time_t now = time(NULL);
-    struct tm tm_buf;
-    char ts[32];
-    if (localtime_r(&now, &tm_buf))
-        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
-    else
-        snprintf(ts, sizeof(ts), "0000-00-00 00:00:00");
+	time_t now = time(NULL);
+	struct tm tm_buf;
+	char ts[32];
+	if(localtime_r(&now, &tm_buf))
+		strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+	else
+		snprintf(ts, sizeof(ts), "0000-00-00 00:00:00");
 
-    /* Hostname is the only free-form field — strip commas/newlines so it can't
-     * break the CSV column count */
-    char host[256] = "";
-    if (hostname && hostname[0]) {
-        size_t j = 0;
-        for (size_t i = 0; hostname[i] && j < sizeof(host) - 1; i++) {
-            char c = hostname[i];
-            host[j++] = (c == ',' || c == '\n' || c == '\r') ? '_' : c;
-        }
-        host[j] = '\0';
-    }
+	// Hostname is the only free-form field
+	char host[256] = "";
 
-    char log_entry[700];
-    int n = snprintf(log_entry, sizeof(log_entry), "%s,%s,%s,%s,%s,%s\n",
-                     ts, event,
-                     (mac && mac[0])             ? mac       : "",
-                     (device_id && device_id[0]) ? device_id : "",
-                     host,
-                     (ip && ip[0])               ? ip        : "");
-    if (n > 0 && write(fd, log_entry, (size_t)n) < 0)
-        syslog(LOG_WARNING, "Failed to write server log: %s", strerror(errno));
-    close(fd);
+	if(hostname && hostname[0]) {
+		size_t j = 0;
+		for(size_t i = 0; hostname[i] && j < sizeof(host) - 1; i++) {
+			char c = hostname[i];
+			host[j++] = (c == ',' || c == '\n' || c == '\r') ? '_' : c;
+		}
+		host[j] = '\0';
+	}
+
+	char log_entry[700];
+	int n = snprintf(log_entry, sizeof(log_entry), "%s,%s,%s,%s,%s,%s\n",
+					 ts, event,
+					 (mac && mac[0]) ? mac : "",
+					 (device_id && device_id[0]) ? device_id : "",
+					 host,
+					 (ip && ip[0]) ? ip : "");
+	if(n > 0 && write(fd, log_entry, (size_t)n) < 0)
+		syslog(LOG_WARNING, "Failed to write server log: %s", strerror(errno));
+	close(fd);
 }
 
-/* In a cluster, a REQUEST for an address we have no record of: accept it if
- * it's ours to give (adopt), NAK it if someone else holds it, otherwise stay
- * silent.  Returns 1 = proceed to ACK, 0 = NAK built, -1 = no reply. */
+// Handle requests for unrecorded cluster leases.
 static int unknown_lease(struct dhcp_packet *request, struct dhcp_packet *response,
-                         dhcp_config_t *config, size_t *pkt_len,
-                         const char *device_id, uint32_t ip, bool nak_if_free,
-                         const char *mac_str, const char *what) {
-    if (ha_enabled()) {
-        if (lease_adopt(config, device_id, ip)) return 1;
-        char ip_str[IP_STR_LEN];
-        struct in_addr a = { .s_addr = ip };
-        inet_ntop(AF_INET, &a, ip_str, sizeof(ip_str));
-        if (ip_in_pool(config, ip) && test_ip(config->ip_table, ip_str))
-            nak_if_free = true;          /* held by another device */
-    }
-    if (!nak_if_free) {
-        syslog(LOG_INFO, "DHCPREQUEST %s: no record for %s — discarding", what, mac_str);
-        return -1;
-    }
-    syslog(LOG_WARNING, "DHCPREQUEST %s: no lease for %s — NAK", what, mac_str);
-    return build_nak(response, request, config, pkt_len) < 0 ? -1 : 0;
+						 dhcp_config_t *config, size_t *pkt_len,
+						 const char *device_id, uint32_t ip, bool nak_if_free,
+						 const char *mac_str, const char *what) {
+	if(ha_enabled()) {
+		if(lease_adopt(config, device_id, ip))
+			return 1;
+		char ip_str[IP_STR_LEN];
+		struct in_addr a = {.s_addr = ip};
+		inet_ntop(AF_INET, &a, ip_str, sizeof(ip_str));
+		if(ip_in_pool(config, ip) && test_ip(config->ip_table, ip_str))
+			nak_if_free = true; // held by another device
+	}
+
+	if(!nak_if_free) {
+		syslog(LOG_INFO, "DHCPREQUEST %s: no record for %s — discarding", what, mac_str);
+
+		return -1;
+	}
+	syslog(LOG_WARNING, "DHCPREQUEST %s: no lease for %s — NAK", what, mac_str);
+
+	return build_nak(response, request, config, pkt_len) < 0 ? -1 : 0;
 }
 
 int process_dhcp_message(struct dhcp_packet *request,
-                         struct dhcp_packet *response,
-                         dhcp_options_t *opts,
-                         dhcp_config_t *config,
-                         size_t *pkt_len,
-                         dhcp_result_t *result,
-                         const dhcp_rx_t *rx) {
-    if (!request || !response || !opts || !config || !pkt_len || !result || !rx) {
-        syslog(LOG_ERR, "process_dhcp_message: NULL parameter");
-        return -1;
-    }
+						 struct dhcp_packet *response,
+						 dhcp_options_t *opts,
+						 dhcp_config_t *config,
+						 size_t *pkt_len,
+						 dhcp_result_t *result,
+						 const dhcp_rx_t *rx) {
+	if(!request || !response || !opts || !config || !pkt_len || !result || !rx) {
+		syslog(LOG_ERR, "process_dhcp_message: NULL parameter");
+		return -1;
+	}
 
-    memset(result, 0, sizeof(*result));
+	memset(result, 0, sizeof(*result));
 
-    char mac_str[MAC_STR_LEN];
-    format_mac_address(request->chaddr, mac_str, sizeof(mac_str));
-    snprintf(result->mac, sizeof(result->mac), "%s", mac_str);
+	char mac_str[MAC_STR_LEN];
+	format_mac_address(request->chaddr, mac_str, sizeof(mac_str));
+	snprintf(result->mac, sizeof(result->mac), "%s", mac_str);
 
-    /* Resolve the device identifier used for all lease lookups */
-    char device_id[256];
-    get_device_identifier(mac_str, opts, device_id, sizeof(device_id));
-    snprintf(result->device_id, sizeof(result->device_id), "%s", device_id);
+	// Resolve the device identifier used for all lease lookups
+	char device_id[256];
+	get_device_identifier(mac_str, opts, device_id, sizeof(device_id));
+	snprintf(result->device_id, sizeof(result->device_id), "%s", device_id);
 
-    /* Capture hostname from options if present */
-    if (opts->found_hostname && opts->hostname[0] != '\0')
-        snprintf(result->hostname, sizeof(result->hostname), "%s", opts->hostname);
+	// Capture hostname from options if present
+	if(opts->found_hostname && opts->hostname[0] != '\0')
+		snprintf(result->hostname, sizeof(result->hostname), "%s", opts->hostname);
 
-    /* Cluster: still syncing, or not a member — let the other nodes answer */
-    if (!ha_serving()) {
-        syslog(LOG_DEBUG, "Not serving yet (%s) — ignoring %s",
-               ha_state_name(ha_self_state()), mac_str);
-        return -1;
-    }
+	// Cluster: still syncing, or not a member — let the other nodes answer
+	if(!ha_serving()) {
+		syslog(LOG_DEBUG, "Not serving yet (%s) — ignoring %s",
+			   ha_state_name(ha_self_state()), mac_str);
+		return -1;
+	}
 
-    /* Who answers depends on how the packet got here:
-     *  - broadcast: every node on every machine heard it, so only the node
-     *    that owns this client's bucket answers;
-     *  - relayed (or a stray unicast DISCOVER/INFORM): exactly one node per
-     *    server address got it.  If the owner is a sibling sharing our
-     *    address, hand the packet to it — the owner must answer, because new
-     *    addresses come from the owner's own slice;
-     *  - a plain unicast renewal to our address: always answer — every node
-     *    has every lease. */
-    bool broadcast = rx->broadcast;
-    bool relayed   = !broadcast && request->giaddr != 0;
-    bool exact     = rx->forwarded || ha_owns_client(device_id);
-    bool routable  = relayed || opts->message_type == DHCPDISCOVER ||
-                     opts->message_type == DHCPINFORM;
-    if (!broadcast && routable && !exact) {
-        if (ha_address_owns_client(device_id) &&
-            ha_bucket_owner(device_id, result->forward_to, sizeof(result->forward_to))) {
-            syslog(LOG_DEBUG, "%s: handing to %s (its bucket, our address)",
-                   mac_str, result->forward_to);
-        } else {
-            result->forward_to[0] = '\0';
-            syslog(LOG_DEBUG, "%s: another machine's bucket", mac_str);
-        }
-        return -1;
-    }
-    bool to_everyone = broadcast || relayed;
-    bool mine        = broadcast ? exact : true;
-    /* Several nodes sharing one address all see a broadcast that names it as
-     * the server, so the bucket owner (the one that made the offer) answers. */
-    bool shared_bcast = broadcast && ha_address_shared();
-    uint32_t our_ip  = inet_addr(config->server_ip);
-    uint32_t lease_secs = ha_lease_time(config->lease_time);
+	// Route replies according to packet delivery.
+	bool broadcast = rx->broadcast;
+	bool relayed = !broadcast && request->giaddr != 0;
+	bool exact = rx->forwarded || ha_owns_client(device_id);
+	bool routable = relayed || opts->message_type == DHCPDISCOVER ||
+					opts->message_type == DHCPINFORM;
 
-    switch (opts->message_type) {
+	if(!broadcast && routable && !exact) {
+		if(ha_address_owns_client(device_id) &&
+		   ha_bucket_owner(device_id, result->forward_to, sizeof(result->forward_to))) {
+			syslog(LOG_DEBUG, "%s: handing to %s (its bucket, our address)",
+				   mac_str, result->forward_to);
+		} else {
+			result->forward_to[0] = '\0';
+			syslog(LOG_DEBUG, "%s: another machine's bucket", mac_str);
+		}
 
-        case DHCPDISCOVER:
-            syslog(LOG_INFO, "DHCPDISCOVER from %s%s%s",
-                   mac_str,
-                   opts->found_hostname ? " hostname=" : "",
-                   opts->found_hostname ? opts->hostname : "");
+		return -1;
+	}
 
-            if (!mine) {
-                syslog(LOG_DEBUG, "DHCPDISCOVER from %s: another node's bucket", mac_str);
-                return -1;
-            }
+	bool to_everyone = broadcast || relayed;
+	bool mine = broadcast ? exact : true;
+	// Only the bucket owner answers broadcasts.
+	bool shared_bcast = broadcast && ha_address_shared();
+	uint32_t our_ip = inet_addr(config->server_ip);
+	uint32_t lease_secs = ha_lease_time(config->lease_time);
 
-            if (build_offer(response, request, opts, config, pkt_len, lease_secs) < 0) {
-                syslog(LOG_ERR, "Failed to build DHCPOFFER for %s", mac_str);
-                return -1;
-            }
+	switch(opts->message_type) {
+	case DHCPDISCOVER:
+		syslog(LOG_INFO, "DHCPDISCOVER from %s%s%s",
+			   mac_str,
+			   opts->found_hostname ? " hostname=" : "",
+			   opts->found_hostname ? opts->hostname : "");
 
-            /* Capture offered IP for post-lock logging */
-            {
-                struct in_addr oa; oa.s_addr = response->yiaddr;
-                inet_ntop(AF_INET, &oa, result->resp_ip, sizeof(result->resp_ip));
-            }
-            /* Never offered before?  The worker checks nobody's using it. */
-            {
-                struct Tree_Node *n = find_node(config->mac_table, device_id);
-                if (n && n->ip && n->unverified)
-                    snprintf(result->probe_ip, sizeof(result->probe_ip), "%s", n->ip);
-            }
-            strncpy(result->req_log,  "DHCPDISCOVER", sizeof(result->req_log)  - 1);
-            strncpy(result->resp_log, "DHCPOFFER",    sizeof(result->resp_log) - 1);
-            syslog(LOG_INFO, "Sending DHCPOFFER %s to %s", result->resp_ip, mac_str);
-            break;
+		if(!mine) {
+			syslog(LOG_DEBUG, "DHCPDISCOVER from %s: another node's bucket", mac_str);
+			return -1;
+		}
 
-        case DHCPREQUEST: {
-            syslog(LOG_INFO, "DHCPREQUEST from %s", mac_str);
+		if(build_offer(response, request, opts, config, pkt_len, lease_secs) < 0) {
+			syslog(LOG_ERR, "Failed to build DHCPOFFER for %s", mac_str);
+			return -1;
+		}
 
-            if (opts->found_server_id) {
-                /* Client picked an offer — server ID present means SELECTING state */
-                if (opts->server_identifier != our_ip) {
-                    syslog(LOG_DEBUG,
-                           "DHCPREQUEST for other server (0x%08X) from %s — discarding",
-                           ntohl(opts->server_identifier), mac_str);
-                    return -1;
-                }
-                if (shared_bcast && !exact) {
-                    syslog(LOG_DEBUG, "DHCPREQUEST from %s: our address, but a "
-                           "neighbour's bucket", mac_str);
-                    return -1;
-                }
+		// Capture offered IP for post-lock logging
+		{
+			struct in_addr oa;
+			oa.s_addr = response->yiaddr;
+			inet_ntop(AF_INET, &oa, result->resp_ip, sizeof(result->resp_ip));
+		}
+		// Never offered before?  The worker checks nobody's using it.
+		{
+			struct tree_node *n = find_node(config->mac_table, device_id);
+			if(n && n->ip && n->unverified)
+				snprintf(result->probe_ip, sizeof(result->probe_ip), "%s", n->ip);
+		}
+		strncpy(result->req_log, "DHCPDISCOVER", sizeof(result->req_log) - 1);
+		strncpy(result->resp_log, "DHCPOFFER", sizeof(result->resp_log) - 1);
+		syslog(LOG_INFO, "Sending DHCPOFFER %s to %s", result->resp_ip, mac_str);
+		break;
 
-                /* Make sure it's actually asking for the IP we offered */
-                if (opts->found_requested_ip) {
-                    char *expected = find_existing_lease(device_id, config);
-                    bool mismatch = (!expected ||
-                                    opts->requested_ip != inet_addr(expected));
-                    free(expected);
-                    if (mismatch) {
-                        syslog(LOG_WARNING,
-                               "DHCPREQUEST SELECTING: IP mismatch for %s — NAK",
-                               mac_str);
-                        if (build_nak(response, request, config, pkt_len) < 0)
-                            return -1;
-                        return 0;
-                    }
-                }
+	case DHCPREQUEST: {
+		syslog(LOG_INFO, "DHCPREQUEST from %s", mac_str);
 
-            } else if (to_everyone && !mine) {
-                syslog(LOG_DEBUG, "DHCPREQUEST from %s: another node's bucket", mac_str);
-                return -1;
+		if(opts->found_server_id) {
+			// Client picked an offer — server ID present means SELECTING state
+			if(opts->server_identifier != our_ip) {
+				syslog(LOG_DEBUG,
+					   "DHCPREQUEST for other server (0x%08X) from %s — discarding",
+					   ntohl(opts->server_identifier), mac_str);
 
-            } else if (opts->found_requested_ip) {
-                /* No server ID but has a requested IP — client is rebooting and
-                 * trying to reclaim the address it had before */
-                char *existing = find_existing_lease(device_id, config);
-                if (!existing) {
-                    int rc = unknown_lease(request, response, config, pkt_len, device_id,
-                                           opts->requested_ip, false, mac_str,
-                                           "INIT-REBOOT");
-                    if (rc <= 0) return rc;
-                } else {
-                    bool mismatch = (opts->requested_ip != inet_addr(existing));
-                    free(existing);
-                    if (mismatch) {
-                        syslog(LOG_WARNING,
-                               "DHCPREQUEST INIT-REBOOT: IP mismatch for %s — NAK",
-                               mac_str);
-                        if (build_nak(response, request, config, pkt_len) < 0)
-                            return -1;
-                        return 0;
-                    }
-                }
+				return -1;
+			}
 
-            } else {
-                /* No server ID and no requested IP — client is renewing or rebinding.
-                 * ciaddr is its current address; make sure it matches what we have. */
-                if (request->ciaddr != 0) {
-                    char *existing = find_existing_lease(device_id, config);
-                    if (!existing) {
-                        int rc = unknown_lease(request, response, config, pkt_len,
-                                               device_id, request->ciaddr, true,
-                                               mac_str, "RENEWING");
-                        if (rc <= 0) return rc;
-                    } else {
-                        bool mismatch = (request->ciaddr != inet_addr(existing));
-                        free(existing);
-                        if (mismatch) {
-                            syslog(LOG_WARNING,
-                                   "DHCPREQUEST RENEWING: ciaddr mismatch for %s — NAK",
-                                   mac_str);
-                            if (build_nak(response, request, config, pkt_len) < 0)
-                                return -1;
-                            return 0;
-                        }
-                    }
-                }
-            }
+			if(shared_bcast && !exact) {
+				syslog(LOG_DEBUG, "DHCPREQUEST from %s: our address, but a "
+								  "neighbour's bucket",
+					   mac_str);
 
-            /* Record the requested IP for the log line */
-            if (opts->found_requested_ip) {
-                struct in_addr ra; ra.s_addr = opts->requested_ip;
-                inet_ntop(AF_INET, &ra, result->req_ip, sizeof(result->req_ip));
-            }
+				return -1;
+			}
 
-            if (build_ack(response, request, opts, config, pkt_len, lease_secs) < 0) {
-                syslog(LOG_ERR, "Failed to build DHCPACK for %s", mac_str);
-                return -1;
-            }
+			// Make sure it's actually asking for the IP we offered
 
-            /* Grab the confirmed IP for the log and the lease file update */
-            {
-                struct in_addr ya; ya.s_addr = response->yiaddr;
-                inet_ntop(AF_INET, &ya, result->resp_ip, sizeof(result->resp_ip));
-            }
+			if(opts->found_requested_ip) {
+				char *expected = find_existing_lease(device_id, config);
+				bool mismatch = (!expected ||
+								 opts->requested_ip != inet_addr(expected));
+				free(expected);
 
-            /* Stamp the confirmed expiry time and hostname, then write the
-             * journal line — all while we still hold the lock */
-            update_lease_expiry(device_id, time(NULL) + (time_t)lease_secs, config);
-            if (result->hostname[0])
-                update_node_hostname(config->mac_table, device_id, result->hostname);
-            lease_commit_ack(config, find_node(config->mac_table, device_id),
-                             mac_str, &result->commit);
+				if(mismatch) {
+					syslog(LOG_WARNING,
+						   "DHCPREQUEST SELECTING: IP mismatch for %s — NAK",
+						   mac_str);
+					if(build_nak(response, request, config, pkt_len) < 0)
+						return -1;
 
-            strncpy(result->req_log,  "DHCPREQUEST", sizeof(result->req_log)  - 1);
-            strncpy(result->resp_log, "DHCPACK",     sizeof(result->resp_log) - 1);
-            syslog(LOG_INFO, "Sending DHCPACK %s to %s (%us)", result->resp_ip,
-                   mac_str, lease_secs);
-            break;
-        }
+					return 0;
+				}
+			}
+		} else if(to_everyone && !mine) {
+			syslog(LOG_DEBUG, "DHCPREQUEST from %s: another node's bucket", mac_str);
 
-        case DHCPRELEASE: {
-            if (opts->found_server_id && opts->server_identifier != our_ip)
-                return -1;                   /* released to another node */
-            syslog(LOG_INFO, "DHCPRELEASE from %s (device %s)", mac_str, device_id);
-            struct Tree_Node *node = find_node(config->mac_table, device_id);
-            if (node && node->ip)
-                snprintf(result->req_ip, sizeof(result->req_ip), "%s", node->ip);
-            if (!node || lease_commit_release(config, node, &result->commit) < 0)
-                syslog(LOG_WARNING, "Release for unknown device: %s", device_id);
-            strncpy(result->req_log, "DHCPRELEASE", sizeof(result->req_log) - 1);
-            return -1;   /* no reply needed; the log entry goes out via req_log */
-        }
+			return -1;
+		} else if(opts->found_requested_ip) {
+			// No server ID but has a requested IP
+			char *existing = find_existing_lease(device_id, config);
+			if(!existing) {
+				int rc = unknown_lease(request, response, config, pkt_len, device_id,
+									   opts->requested_ip, false, mac_str,
+									   "INIT-REBOOT");
+				if(rc <= 0)
+					return rc;
+			} else {
+				bool mismatch = (opts->requested_ip != inet_addr(existing));
+				free(existing);
 
-        case DHCPDECLINE:
-            if (opts->found_server_id && opts->server_identifier != our_ip)
-                return -1;                   /* declined another node's offer */
-            if (shared_bcast && !exact)
-                return -1;                   /* a neighbour on our address made that offer */
-            syslog(LOG_WARNING, "DHCPDECLINE from %s (device %s)", mac_str, device_id);
-            if (opts->found_requested_ip) {
-                char ip_str[IP_STR_LEN];
-                struct in_addr a = { .s_addr = opts->requested_ip };
-                inet_ntop(AF_INET, &a, ip_str, sizeof(ip_str));
-                snprintf(result->req_ip, sizeof(result->req_ip), "%s", ip_str);
-                lease_commit_decline(config, ip_str,
-                                     find_node(config->mac_table, device_id),
-                                     &result->commit);
-            }
-            strncpy(result->req_log, "DHCPDECLINE", sizeof(result->req_log) - 1);
-            return -1;   /* no reply needed */
+				if(mismatch) {
+					syslog(LOG_WARNING,
+						   "DHCPREQUEST INIT-REBOOT: IP mismatch for %s — NAK",
+						   mac_str);
+					if(build_nak(response, request, config, pkt_len) < 0)
+						return -1;
 
-        case DHCPINFORM:
-            if (to_everyone && !mine) return -1;
-            syslog(LOG_INFO, "DHCPINFORM from %s", mac_str);
-            if (build_inform_ack(response, request, opts, config, pkt_len) < 0) {
-                syslog(LOG_ERR, "Failed to build INFORM ACK for %s", mac_str);
-                return -1;
-            }
-            strncpy(result->req_log,  "DHCPINFORM", sizeof(result->req_log)  - 1);
-            strncpy(result->resp_log, "DHCPACK",    sizeof(result->resp_log) - 1);
-            syslog(LOG_INFO, "Sending INFORM ACK to %s", mac_str);
-            break;
+					return 0;
+				}
+			}
+		} else {
+			// No server ID and no requested IP client is renewing or rebinding.
 
-        default:
-            syslog(LOG_DEBUG, "Unsupported DHCP message type %d from %s",
-                   opts->message_type, mac_str);
-            return -1;
-    }
+			if(request->ciaddr != 0) {
+				char *existing = find_existing_lease(device_id, config);
+				if(!existing) {
+					int rc = unknown_lease(request, response, config, pkt_len,
+										   device_id, request->ciaddr, true,
+										   mac_str, "RENEWING");
+					if(rc <= 0)
+						return rc;
+				} else {
+					bool mismatch = (request->ciaddr != inet_addr(existing));
+					free(existing);
 
-    return 0;
+					if(mismatch) {
+						syslog(LOG_WARNING,
+							   "DHCPREQUEST RENEWING: ciaddr mismatch for %s — NAK",
+							   mac_str);
+						if(build_nak(response, request, config, pkt_len) < 0)
+							return -1;
+
+						return 0;
+					}
+				}
+			}
+		}
+
+		// Record the requested IP for the log line
+		if(opts->found_requested_ip) {
+			struct in_addr ra;
+			ra.s_addr = opts->requested_ip;
+			inet_ntop(AF_INET, &ra, result->req_ip, sizeof(result->req_ip));
+		}
+
+		if(build_ack(response, request, opts, config, pkt_len, lease_secs) < 0) {
+			syslog(LOG_ERR, "Failed to build DHCPACK for %s", mac_str);
+
+			return -1;
+		}
+
+		// Grab the confirmed IP for the log and the lease file update
+		{
+			struct in_addr ya;
+			ya.s_addr = response->yiaddr;
+			inet_ntop(AF_INET, &ya, result->resp_ip, sizeof(result->resp_ip));
+		}
+
+		// Stamp the confirmed expiry time and hostname, then write the journal line
+		update_lease_expiry(device_id, time(NULL) + (time_t)lease_secs, config);
+		if(result->hostname[0])
+			update_node_hostname(config->mac_table, device_id, result->hostname);
+		lease_commit_ack(config, find_node(config->mac_table, device_id),
+						 mac_str, &result->commit);
+
+		strncpy(result->req_log, "DHCPREQUEST", sizeof(result->req_log) - 1);
+		strncpy(result->resp_log, "DHCPACK", sizeof(result->resp_log) - 1);
+		syslog(LOG_INFO, "Sending DHCPACK %s to %s (%us)", result->resp_ip,
+			   mac_str, lease_secs);
+		break;
+	}
+
+	case DHCPRELEASE: {
+		if(opts->found_server_id && opts->server_identifier != our_ip)
+			return -1; // released to another node
+		syslog(LOG_INFO, "DHCPRELEASE from %s (device %s)", mac_str, device_id);
+		struct tree_node *node = find_node(config->mac_table, device_id);
+		if(node && node->ip)
+			snprintf(result->req_ip, sizeof(result->req_ip), "%s", node->ip);
+		if(!node || lease_commit_release(config, node, &result->commit) < 0)
+			syslog(LOG_WARNING, "Release for unknown device: %s", device_id);
+		strncpy(result->req_log, "DHCPRELEASE", sizeof(result->req_log) - 1);
+		return -1; // no reply needed; the log entry goes out via req_log
+	}
+
+	case DHCPDECLINE:
+		if(opts->found_server_id && opts->server_identifier != our_ip)
+			return -1; // declined another node's offer
+		if(shared_bcast && !exact)
+			return -1; // a neighbour on our address made that offer
+		syslog(LOG_WARNING, "DHCPDECLINE from %s (device %s)", mac_str, device_id);
+
+		if(opts->found_requested_ip) {
+			char ip_str[IP_STR_LEN];
+			struct in_addr a = {.s_addr = opts->requested_ip};
+			inet_ntop(AF_INET, &a, ip_str, sizeof(ip_str));
+			snprintf(result->req_ip, sizeof(result->req_ip), "%s", ip_str);
+			lease_commit_decline(config, ip_str,
+								 find_node(config->mac_table, device_id),
+								 &result->commit);
+		}
+
+		strncpy(result->req_log, "DHCPDECLINE", sizeof(result->req_log) - 1);
+		return -1; // no reply needed
+
+	case DHCPINFORM:
+		if(to_everyone && !mine)
+			return -1;
+		syslog(LOG_INFO, "DHCPINFORM from %s", mac_str);
+		if(build_inform_ack(response, request, opts, config, pkt_len) < 0) {
+			syslog(LOG_ERR, "Failed to build INFORM ACK for %s", mac_str);
+			return -1;
+		}
+		strncpy(result->req_log, "DHCPINFORM", sizeof(result->req_log) - 1);
+		strncpy(result->resp_log, "DHCPACK", sizeof(result->resp_log) - 1);
+		syslog(LOG_INFO, "Sending INFORM ACK to %s", mac_str);
+		break;
+
+	default:
+		syslog(LOG_DEBUG, "Unsupported DHCP message type %d from %s",
+			   opts->message_type, mac_str);
+		return -1;
+	}
+
+	return 0;
 }
 
-/* --------------------------------------------------------------------------
- * parse_dhcp_options
- * -------------------------------------------------------------------------- */
+// DHCP option parsing
 int parse_dhcp_options(struct dhcp_packet *packet, dhcp_options_t *opts,
-                       size_t opt_len) {
-    if (!packet || !opts)
-        return -1;
+					   size_t opt_len) {
+	if(!packet || !opts)
+		return -1;
 
-    /* Never walk past the end of the options field even if the caller
-     * miscounts; the real cap is whichever is smaller. */
-    if (opt_len > sizeof(packet->options))
-        opt_len = sizeof(packet->options);
+	// Bound parsing to the received options field.
+	if(opt_len > sizeof(packet->options))
+		opt_len = sizeof(packet->options);
 
-    memset(opts, 0, sizeof(dhcp_options_t));
+	memset(opts, 0, sizeof(dhcp_options_t));
 
-    if (packet->op != 1) {
-        syslog(LOG_WARNING, "Rejected non-BOOTREQUEST packet (op=%d)", packet->op);
-        return -1;
-    }
+	if(packet->op != 1) {
+		syslog(LOG_WARNING, "Rejected non-BOOTREQUEST packet (op=%d)", packet->op);
 
-    if (ntohl(packet->magic_cookie) != DHCP_MAGIC_COOKIE) {
-        syslog(LOG_WARNING, "Invalid magic cookie: 0x%08X",
-               ntohl(packet->magic_cookie));
-        return -1;
-    }
+		return -1;
+	}
 
-    for (size_t i = 0; i < opt_len; ) {
-        uint8_t code = packet->options[i++];
+	if(ntohl(packet->magic_cookie) != DHCP_MAGIC_COOKIE) {
+		syslog(LOG_WARNING, "Invalid magic cookie: 0x%08X",
+			   ntohl(packet->magic_cookie));
 
-        if (code == 0xFF) break;
-        if (code == 0x00) continue;
+		return -1;
+	}
 
-        if (i >= opt_len) {
-            syslog(LOG_WARNING, "Options parsing ran past end of buffer");
-            break;
-        }
+	for(size_t i = 0; i < opt_len;) {
+		uint8_t code = packet->options[i++];
 
-        uint8_t len = packet->options[i++];
+		if(code == 0xFF)
+			break;
+		if(code == 0x00)
+			continue;
 
-        if (i + len > opt_len) {
-            syslog(LOG_WARNING, "Option length exceeds buffer bounds");
-            break;
-        }
+		if(i >= opt_len) {
+			syslog(LOG_WARNING, "Options parsing ran past end of buffer");
+			break;
+		}
 
-        switch (code) {
-            case 53: /* DHCP Message Type */
-                if (len == 1) {
-                    opts->message_type = packet->options[i];
-                    opts->found_message_type = true;
-                }
-                break;
-            case 50: /* Requested IP Address */
-                if (len == 4) {
-                    memcpy(&opts->requested_ip, &packet->options[i], 4);
-                    opts->found_requested_ip = true;
-                }
-                break;
-            case 54: /* Server Identifier */
-                if (len == 4) {
-                    memcpy(&opts->server_identifier, &packet->options[i], 4);
-                    opts->found_server_id = true;
-                }
-                break;
-            case 51: /* IP Address Lease Time */
-                if (len == 4) {
-                    memcpy(&opts->lease_time, &packet->options[i], 4);
-                    opts->lease_time = ntohl(opts->lease_time);
-                    opts->found_lease_time = true;
-                }
-                break;
-            case 12: /* Hostname — len is uint8_t (max 255); hostname[256] always fits */
-                memcpy(opts->hostname, &packet->options[i], len);
-                opts->hostname[len] = '\0';
-                opts->found_hostname = true;
-                break;
-            case 55: /* Parameter Request List — parameter_list[256] always fits */
-                memcpy(opts->parameter_list, &packet->options[i], len);
-                opts->parameter_list_len = len;
-                break;
-            case 61: /* Client Identifier — client_id[256] always fits */
-                memcpy(opts->client_id, &packet->options[i], len);
-                opts->client_id_len = len;
-                opts->found_client_id = true;
-                break;
-        }
+		uint8_t len = packet->options[i++];
 
-        i += len;
-    }
+		if(i + len > opt_len) {
+			syslog(LOG_WARNING, "Option length exceeds buffer bounds");
+			break;
+		}
 
-    return 0;
+		switch(code) {
+		case 53: // DHCP Message Type
+			if(len == 1) {
+				opts->message_type = packet->options[i];
+				opts->found_message_type = true;
+			}
+			break;
+		case 50: // Requested IP Address
+			if(len == 4) {
+				memcpy(&opts->requested_ip, &packet->options[i], 4);
+				opts->found_requested_ip = true;
+			}
+			break;
+		case 54: // Server Identifier
+			if(len == 4) {
+				memcpy(&opts->server_identifier, &packet->options[i], 4);
+				opts->found_server_id = true;
+			}
+			break;
+		case 51: // IP Address Lease Time
+			if(len == 4) {
+				memcpy(&opts->lease_time, &packet->options[i], 4);
+				opts->lease_time = ntohl(opts->lease_time);
+				opts->found_lease_time = true;
+			}
+			break;
+		case 12: // Hostname — len is uint8_t (max 255); hostname[256] always fits
+			memcpy(opts->hostname, &packet->options[i], len);
+			opts->hostname[len] = '\0';
+			opts->found_hostname = true;
+			break;
+		case 55: // Parameter Request List — parameter_list[256] always fits
+			memcpy(opts->parameter_list, &packet->options[i], len);
+			opts->parameter_list_len = len;
+			break;
+		case 61: // Client Identifier — client_id[256] always fits
+			memcpy(opts->client_id, &packet->options[i], len);
+			opts->client_id_len = len;
+			opts->found_client_id = true;
+			break;
+		}
+
+		i += len;
+	}
+
+	return 0;
 }

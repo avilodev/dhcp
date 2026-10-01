@@ -5,34 +5,32 @@
 #include <stdlib.h>
 
 #include <fcntl.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 
-#include <sys/types.h>
 #include <sys/stat.h>
- 
+#include <sys/types.h>
+
 #include <time.h>
 
-struct Trie  
-{
-    struct Trie_Node* head;
+struct trie_t {
+	struct trie_node *head;
 };
 
-struct Trie_Node
-{
-    struct Trie_Node* structure[256];
-    int end;
+struct trie_node {
+	struct trie_node *structure[256];
+	int end;
 };
 
-struct Trie* create_trie();
-struct Trie_Node* add_node();
+struct trie_t *create_trie();
+struct trie_node *add_node();
 
-void add_word(struct Trie*, char*);
-void remove_word(struct Trie*, char*);
+void add_word(struct trie_t *, char *);
+void remove_word(struct trie_t *, char *);
 
-int test_ip(struct Trie*, char*);
+int test_ip(struct trie_t *, char *);
 
-void free_node(struct Trie_Node*);
-void free_trie(struct Trie*);
+void free_node(struct trie_node *);
+void free_trie(struct trie_t *);
 
-#endif  
+#endif /* TRIE_H */

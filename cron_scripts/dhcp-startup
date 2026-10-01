@@ -2,7 +2,7 @@
 #
 # dhcp-startup — boot launcher for the DHCP server.
 #
-# This is the ONE file you edit to change how the server starts at boot.
+# This is the ONE file to edit to change how the server starts at boot.
 #
 # It starts the main server (misc/dhcp.conf) plus every extra instance in
 # misc/instances/*/dhcp.conf, skipping any that are already running — so it's
