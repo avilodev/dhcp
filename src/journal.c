@@ -389,6 +389,13 @@ int journal_init(dhcp_config_t *config) {
     return 0;
 }
 
+int journal_chown(uid_t uid, gid_t gid) {
+    pthread_mutex_lock(&g_jmutex);
+    int rc = (g_fd >= 0) ? fchown(g_fd, uid, gid) : 0;
+    pthread_mutex_unlock(&g_jmutex);
+    return rc;
+}
+
 void journal_close(void) {
     pthread_mutex_lock(&g_jmutex);
     if (g_fd >= 0) {

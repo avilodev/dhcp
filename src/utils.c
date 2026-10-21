@@ -62,30 +62,34 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
         }
     }
 
-    /* If this device already has a valid lease, hand the same IP back */
-    char *existing = find_existing_lease(device_id, config);
-    if (existing) {
-        syslog(LOG_DEBUG, "Reusing IP %s for device %s (MAC: %s)",
-               existing, device_id, mac);
-        return existing;
-    }
-
-    /* Static assignments always win over the dynamic pool */
+    /* Static assignments always win — checked before any existing lease so a
+     * static added or changed while the device holds another address takes
+     * effect on its next request. */
     char *static_ip = check_static_assignment(mac, config);
     if (static_ip) {
         syslog(LOG_INFO, "Using static assignment %s for MAC %s",
                static_ip, mac);
         /* A client that sends a Client-ID gets its own node keyed by that id;
          * mark it static too so it never expires out from under the MAC entry.
-         * The MAC node stays the IP's owner. */
+         * The MAC node stays the IP's owner.  Refresh the copy if the static
+         * has moved since it was made. */
         struct Tree_Node *node = get_or_create_node(config->mac_table, device_id);
-        if (node && !node->is_static) {
+        if (node && strcmp(node->key, mac) != 0 &&
+            !(node->is_static && node->ip && strcmp(node->ip, static_ip) == 0)) {
             if (node->ip) lease_drop_ip(config, node);
             node->ip        = strdup(static_ip);
             node->is_static = true;
             node->expires   = 0;
         }
         return static_ip;
+    }
+
+    /* If this device already has a valid lease, hand the same IP back */
+    char *existing = find_existing_lease(device_id, config);
+    if (existing) {
+        syslog(LOG_DEBUG, "Reusing IP %s for device %s (MAC: %s)",
+               existing, device_id, mac);
+        return existing;
     }
 
     /* New device — find a free IP.  Short expiry means if the client goes
@@ -125,6 +129,16 @@ char *find_existing_lease(const char *device_id, dhcp_config_t *config) {
     }
 
     return strdup(node->ip);
+}
+
+/* The address a client should be using right now: its MAC's static
+ * assignment if it has one, else its current lease.  Statics are looked up by
+ * MAC because a Client-ID copy of one only exists once the device has asked
+ * since the last start (and may still hold an old static address). */
+char *current_address(const char *mac, const char *device_id,
+                      dhcp_config_t *config) {
+    char *ip = check_static_assignment(mac, config);
+    return ip ? ip : find_existing_lease(device_id, config);
 }
 
 /* Static assignments are flagged is_static and keyed by MAC.  They're already

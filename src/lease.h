@@ -71,7 +71,8 @@ int load_static_assignments(dhcp_config_t *config);
 int load_blacklist(dhcp_config_t *config);
 bool is_blacklisted(dhcp_config_t *config, const char *mac);
 
-/* Hot-reload under g_server_mutex — add/update entries only, never remove */
+/* Hot-reload under g_server_mutex.  Statics: add/update entries only, never
+ * remove.  Blacklist: replaced by the file's current contents. */
 int reload_static_assignments(dhcp_config_t *config);
 int reload_blacklist(dhcp_config_t *config);
 

@@ -432,6 +432,7 @@ int reload_static_assignments(dhcp_config_t *config) {
     if (!buffer) return 0;
 
     int added = 0, updated = 0;
+    struct Tree *seen = create_tree();   /* MACs met in this pass, to catch repeats */
     char *save_ptr;
     for (char *line = strtok_r(buffer, "\n", &save_ptr); line;
          line = strtok_r(NULL, "\n", &save_ptr)) {
@@ -446,6 +447,11 @@ int reload_static_assignments(dhcp_config_t *config) {
             syslog(LOG_WARNING, "static list: bad IP '%s' for %s — skipped", ip, mac);
             continue;
         }
+        if (seen && find_node(seen, mac))
+            syslog(LOG_WARNING, "static list: %s is listed more than once — the "
+                   "later line (%s %s) wins", mac, label, ip);
+        else if (seen)
+            add_tree_node(seen, mac, NULL, 0);
 
         struct Tree_Node *node = get_or_create_node(config->mac_table, mac);
         if (!node) continue;
@@ -483,6 +489,7 @@ int reload_static_assignments(dhcp_config_t *config) {
     }
 
     free(buffer);
+    destroy_tree(seen);
     syslog(LOG_INFO, "Static list: %d added, %d refreshed", added, updated);
     return added + updated;
 }
@@ -493,94 +500,59 @@ int load_static_assignments(dhcp_config_t *config) {
 
 /* ---- blacklist ------------------------------------------------------------- */
 
-int load_blacklist(dhcp_config_t *config) {
-    if (!config || !config->blacklist || !config->blacklist_path) return -1;
+/* Read blacklist.txt into a fresh tree: one MAC per line (first word),
+ * '#' comments, any case.  A missing or empty file is an empty list.
+ * Returns NULL only if memory runs out; *count gets the number of entries. */
+static struct Tree *read_blacklist(const char *path, int *count) {
+    struct Tree *tree = create_tree();
+    *count = 0;
+    if (!tree) return NULL;
 
-    int fd = open(config->blacklist_path, O_RDONLY);
-    if (fd < 0) return -1;
-
-    struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size == 0) { close(fd); return -1; }
-    size_t buf_size = (size_t)st.st_size + 1;
-
-    char *buffer = malloc(buf_size);
-    if (!buffer) { close(fd); return -1; }
-
-    ssize_t n = read(fd, buffer, buf_size - 1);
-    close(fd);
-    if (n <= 0) { free(buffer); return -1; }
-    buffer[n] = '\0';
+    char *buffer = slurp(path, NULL);
+    if (!buffer) return tree;
 
     char *save_ptr;
-    char *line    = strtok_r(buffer, "\n", &save_ptr);
-    int   loaded  = 0;
-
-    while (line) {
-        if (line[0] == '#' || line[0] == '\0') {
-            line = strtok_r(NULL, "\n", &save_ptr);
+    for (char *line = strtok_r(buffer, "\n", &save_ptr); line;
+         line = strtok_r(NULL, "\n", &save_ptr)) {
+        char mac[64];
+        if (line[0] == '#' || sscanf(line, "%63s", mac) != 1 || mac[0] == '#')
             continue;
+        /* Requests are matched by their upper-case MAC (format_mac_address) */
+        for (char *p = mac; *p; p++)
+            *p = (char)toupper((unsigned char)*p);
+        if (!find_node(tree, mac) && add_tree_node(tree, mac, NULL, 0)) {
+            (*count)++;
+            syslog(LOG_DEBUG, "Blacklisted: %s", mac);
         }
-        char *mac = strtok(line, " \t\r\n");
-        if (mac && strlen(mac) > 0) {
-            add_tree_node(config->blacklist, mac, NULL, 0);
-            loaded++;
-            syslog(LOG_DEBUG, "Added to blacklist: %s", mac);
-        }
-        line = strtok_r(NULL, "\n", &save_ptr);
     }
-
     free(buffer);
-    syslog(LOG_INFO, "Loaded %d entries from blacklist", loaded);
-    return 0;
+    return tree;
+}
+
+/* Replace the blacklist with what blacklist.txt says now, so entries removed
+ * from the file stop being blocked.  If memory runs out the old list stays.
+ * Returns the number of entries, or -1.  Call under g_server_mutex. */
+int reload_blacklist(dhcp_config_t *config) {
+    if (!config || !config->blacklist_path) return -1;
+    int count;
+    struct Tree *fresh = read_blacklist(config->blacklist_path, &count);
+    if (!fresh) {
+        syslog(LOG_ERR, "blacklist: out of memory — keeping the previous list");
+        return -1;
+    }
+    destroy_tree(config->blacklist);
+    config->blacklist = fresh;
+    syslog(LOG_INFO, "Loaded %d entries from blacklist", count);
+    return count;
+}
+
+int load_blacklist(dhcp_config_t *config) {
+    return reload_blacklist(config) > 0 ? 0 : -1;
 }
 
 bool is_blacklisted(dhcp_config_t *config, const char *mac) {
     if (!mac || !config || !config->blacklist) return false;
     return find_node(config->blacklist, mac) != NULL;
-}
-
-/* Re-read blacklist.txt and add any new MACs.  We never remove entries at
- * runtime — once blocked, always blocked until the server restarts.
- * Call under g_server_mutex. */
-int reload_blacklist(dhcp_config_t *config) {
-    if (!config || !config->blacklist || !config->blacklist_path) return -1;
-
-    int fd = open(config->blacklist_path, O_RDONLY);
-    if (fd < 0) return -1;
-
-    struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size == 0) { close(fd); return 0; }
-    size_t buf_size = (size_t)st.st_size + 1;
-
-    char *buffer = malloc(buf_size);
-    if (!buffer) { close(fd); return -1; }
-
-    ssize_t n = read(fd, buffer, buf_size - 1);
-    close(fd);
-    if (n <= 0) { free(buffer); return 0; }
-    buffer[n] = '\0';
-
-    int added = 0;
-    char *save_ptr;
-    char *line = strtok_r(buffer, "\n", &save_ptr);
-
-    while (line) {
-        if (line[0] == '#' || line[0] == '\0') {
-            line = strtok_r(NULL, "\n", &save_ptr);
-            continue;
-        }
-        char *mac = strtok(line, " \t\r\n");
-        if (mac && strlen(mac) > 0 && !find_node(config->blacklist, mac)) {
-            add_tree_node(config->blacklist, mac, NULL, 0);
-            added++;
-            syslog(LOG_INFO, "SIGHUP: blacklisted %s", mac);
-        }
-        line = strtok_r(NULL, "\n", &save_ptr);
-    }
-
-    free(buffer);
-    syslog(LOG_INFO, "SIGHUP blacklist reload: %d new entries", added);
-    return 0;
 }
 
 /* Write a human-readable snapshot of every entry in the lease table to the

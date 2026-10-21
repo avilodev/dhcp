@@ -48,15 +48,18 @@
 #define MAC_STR_LEN         18
 #define IP_STR_LEN          16
 
-/* File Paths */
-#define SERVER_PATH         "/home/avilo/dhcp"
-#define LEASE_DB_FILE       "/misc/members.txt"
-#define STATIC_FILE         "/misc/static_list.txt"
-#define BLACKLIST_FILE      "/misc/blacklist.txt"
-#define PID_FILE            "/misc/server.pid"
-#define SERVER_LOG_FILE     "/misc/server.log"
-#define DUMP_FILE           "/misc/leases_current.txt"
-#define JOURNAL_FILE        "/misc/leases.journal"
+/* File Paths — SERVER_PATH (the checkout's absolute path) comes from the
+ * Makefile as -DSERVER_PATH, so the build works wherever the repo lives. */
+#ifndef SERVER_PATH
+#error "SERVER_PATH is not set — build with make"
+#endif
+#define LEASE_DB_FILE       "/etc/members.txt"
+#define STATIC_FILE         "/config/static_list.txt"
+#define BLACKLIST_FILE      "/config/blacklist.txt"
+#define PID_FILE            "/etc/server.pid"
+#define SERVER_LOG_FILE     "/etc/server.log"
+#define DUMP_FILE           "/etc/leases_current.txt"
+#define JOURNAL_FILE        "/etc/leases.journal"
 
 /* Cluster defaults */
 #ifndef NODE_ID_LEN

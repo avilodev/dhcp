@@ -15,7 +15,7 @@ import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Topology, ensure_namespace, ip_of, POOL  # noqa: E402
+from harness import Topology, ensure_namespace, host_of, ip_of, nsexec, POOL  # noqa: E402
 
 # ---- the server's hashing, ported, so tests can check who owns what --------
 M64 = (1 << 64) - 1
@@ -191,6 +191,74 @@ def single_restart_and_migration(t):
     t.start("a")
     time.sleep(1.5)
     assert t.members("a") == m | {mac(6): t.members("a")[mac(6)]}
+
+
+@test
+def static_with_client_id(t):
+    """A static device that sends a Client-ID (most Linux boxes) is still
+    recognised after a server restart, and a changed static reaches it."""
+    t.write_conf("a", cluster=False)
+    dev, cid, srv = "02:00:00:00:00:77", "0102000000000077", ip_of("a")
+    static = t.node_dir("a") + "/static_list.txt"
+    with open(static, "w") as f:
+        f.write("cam 02:00:00:00:00:77 10.77.0.150\n")
+    t.start("a")
+
+    def types(*args):
+        return [(r["type"], r.get("yiaddr")) for r in t.client(dev, *args, "--cid", cid, wait=1)]
+
+    offer = types("discover")
+    assert offer == [("OFFER", "10.77.0.150")], offer
+    assert types("select", "10.77.0.150", srv) == [("ACK", "10.77.0.150")]
+    t.client_addr("10.77.0.150")
+
+    # restart: the Client-ID → static link is gone from memory (bug: NAK / silence)
+    t.stop("a")
+    t.start("a")
+    assert types("renew", "10.77.0.150", srv) == [("ACK", "10.77.0.150")]
+    t.stop("a")
+    t.start("a")
+    assert types("reboot", "10.77.0.150") == [("ACK", "10.77.0.150")]
+
+    # the static moves (and is listed twice by mistake): SIGHUP applies the
+    # later line to the Client-ID device too, and the duplicate is reported
+    with open(static, "w") as f:
+        f.write("cam 02:00:00:00:00:77 10.77.0.150\n"
+                "cam 02:00:00:00:00:77 10.77.0.151\n")
+    t.signal("a", signal.SIGHUP)
+    time.sleep(0.5)
+    assert "listed more than once" in t.log("a")
+    assert types("renew", "10.77.0.150", srv) == [("NAK", "0.0.0.0")]
+    assert types("discover") == [("OFFER", "10.77.0.151")]
+    t.client_addr("10.77.0.150", add=False)
+
+
+@test
+def single_hygiene(t):
+    """The blacklist matches any case and SIGHUP drops removed entries; a
+    second copy on the same config refuses to start; INFORM needs a ciaddr."""
+    t.write_conf("a", cluster=False)
+    dev = "02:00:00:00:0A:BC"
+    blacklist = t.node_dir("a") + "/blacklist.txt"
+    with open(blacklist, "w") as f:
+        f.write("# blocked\n02:00:00:00:0a:bc   # lower case, with a comment\n")
+    t.start("a")
+    assert t.lease(dev)[0] is None
+    with open(blacklist, "w") as f:
+        f.write("# nothing blocked any more\n")
+    t.signal("a", signal.SIGHUP)
+    time.sleep(0.5)
+    assert t.lease(dev)[0]
+
+    conf = os.path.join(t.node_dir("a"), "dhcp.conf")
+    r = nsexec(host_of("a"), t.binary, conf, capture=True, check=False)
+    assert r.returncode != 0 and "already running" in r.stderr, (r.returncode, r.stderr)
+    assert t.alive("a") and t.read("a", "server.pid").strip(), t.read("a", "server.pid")
+    assert t.lease(mac(1))[0]                    # the first copy still answers
+
+    assert t.client(mac(2), "inform", "0.0.0.0", wait=1) == []
+    acks = [r for r in t.client(mac(2), "inform", "10.77.0.200", wait=1) if r["type"] == "ACK"]
+    assert len(acks) == 1, acks
 
 
 @test

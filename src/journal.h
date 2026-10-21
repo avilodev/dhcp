@@ -4,7 +4,7 @@
 #include "types.h"
 #include "node.h"
 
-/* The lease journal — misc/leases.journal — is the source of truth for every
+/* The lease journal — etc/leases.journal — is the source of truth for every
  * dynamic lease.  One text line per event, appended and never edited:
  *
  *   origin seq time op device_id mac ip expires hostname
@@ -44,6 +44,8 @@ typedef struct {
  * members.txt the first time).  Call once at startup, after statics load. */
 int  journal_init(dhcp_config_t *config);
 void journal_close(void);
+/* Hand the open journal file to uid/gid (before dropping root); 0 on success */
+int  journal_chown(uid_t uid, gid_t gid);
 
 /* The id this server stamps on the records it writes */
 const char *journal_self(void);

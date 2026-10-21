@@ -1,10 +1,10 @@
 # cluster.conf — shared by every member of a DHCP cluster.
 #
-# Copy to misc/cluster/cluster.conf.  With a controller you edit it ONLY on the
-# controller and `kill -HUP` it (or run `bin/dhcp_server --ctl misc/dhcp.conf
+# Copy to config/cluster/cluster.conf.  With a controller you edit it ONLY on the
+# controller and `kill -HUP` it (or run `bin/dhcp_server --ctl config/dhcp.conf
 # push`); it's pushed to every node.  Without a controller, keep an identical
 # copy on every node.  The shared static list and blacklist live next to it
-# (misc/cluster/static_list.txt, misc/cluster/blacklist.txt).
+# (config/cluster/static_list.txt, config/cluster/blacklist.txt).
 
 # ---- Members --------------------------------------------------------------
 # node|controller  <id>  <ip>  [peer port, default: peer_port]
@@ -16,11 +16,11 @@
 # traffic.  The controller can share a machine too (it never uses port 67).
 #
 # This example: three nodes on one Pi, one on another, controller on the first.
-node        A    192.168.1.2          # Pi #1 (main misc/dhcp.conf)
-node        A2   192.168.1.2   648    # Pi #1, misc/instances/A2
-node        A3   192.168.1.2   649    # Pi #1, misc/instances/A3
+node        A    192.168.1.2          # Pi #1 (main config/dhcp.conf)
+node        A2   192.168.1.2   648    # Pi #1, etc/instances/A2
+node        A3   192.168.1.2   649    # Pi #1, etc/instances/A3
 node        B    192.168.1.3          # Pi #2
-controller  C    192.168.1.2   6700   # Pi #1, misc/instances/C (ROLE=controller)
+controller  C    192.168.1.2   6700   # Pi #1, etc/instances/C (ROLE=controller)
 
 # ---- Shared DHCP settings -------------------------------------------------
 start_ip     192.168.1.10

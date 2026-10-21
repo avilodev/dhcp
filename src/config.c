@@ -7,7 +7,7 @@
 extern dhcp_config_t g_config;
 
 /* Default config file location */
-#define DEFAULT_CONF_PATH  SERVER_PATH "/misc/dhcp.conf"
+#define DEFAULT_CONF_PATH  SERVER_PATH "/config/dhcp.conf"
 
 /* Parse dhcp.conf — key/value pairs, '#' comments.
  * Overrides only keys that are present; unrecognised keys are warned. */

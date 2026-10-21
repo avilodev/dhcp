@@ -14,7 +14,7 @@ server_ip    @IP@
 node_id      @ID@
 role         @ROLE@
 peer_port    @PORT@
-peer_key     @PREFIX@/misc/peer.key
+peer_key     @PREFIX@/config/peer.key
 cluster_dir  @CLUSTER_DIR@
 @CONTROLLER_LINE@
 
@@ -26,4 +26,4 @@ pid          @DIR@/server.pid
 dump         @DIR@/leases_current.txt
 
 # Drop root after binding (same as the main dhcp.conf)
-# user         avilo
+user         @RUN_USER@

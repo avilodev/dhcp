@@ -131,17 +131,12 @@ static int build_offer_ack_common(struct dhcp_packet *resp,
         ADD_OPTION(15, dlen, domain);
     }
 
-    /* Option 12: Hostname — echo client's or generate a default.
+    /* Option 12: Hostname — echo the client's own name back.  A client that
+     * sent none gets none: some adopt whatever name the server hands out.
      * strlen of a char[256] is at most 255, so the uint8_t length is exact. */
     if (opts->found_hostname && opts->hostname[0] != '\0') {
         uint8_t hn = (uint8_t)strlen(opts->hostname);
         if (hn > 0) ADD_OPTION(12, hn, opts->hostname);
-    } else {
-        char dflt[64];
-        const char *pfx = (domain[0] != '\0') ? domain : "dhcp";
-        snprintf(dflt, sizeof(dflt), "%s-%02X%02X%02X",
-                 pfx, req->chaddr[3], req->chaddr[4], req->chaddr[5]);
-        ADD_OPTION(12, strlen(dflt), dflt);
     }
 
     /* Lease time (opt 51), renewal time T1 at 50% (opt 58), rebind time T2 at 87.5% (opt 59) */

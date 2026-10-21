@@ -9,7 +9,15 @@ void log_dhcp_interaction(dhcp_config_t *config, const char *event,
     if (!config || !config->log_path || !event) return;
 
     int fd = open(config->log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
+    if (fd < 0) {
+        /* e.g. a root-owned server.log after dropping to `user` — say so
+         * once instead of silently losing every line */
+        static int warned;
+        if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED))
+            syslog(LOG_ERR, "Cannot write %s: %s (further failures not reported)",
+                   config->log_path, strerror(errno));
+        return;
+    }
 
     time_t now = time(NULL);
     struct tm tm_buf;
@@ -186,7 +194,7 @@ int process_dhcp_message(struct dhcp_packet *request,
 
                 /* Make sure it's actually asking for the IP we offered */
                 if (opts->found_requested_ip) {
-                    char *expected = find_existing_lease(device_id, config);
+                    char *expected = current_address(mac_str, device_id, config);
                     bool mismatch = (!expected ||
                                     opts->requested_ip != inet_addr(expected));
                     free(expected);
@@ -207,7 +215,7 @@ int process_dhcp_message(struct dhcp_packet *request,
             } else if (opts->found_requested_ip) {
                 /* No server ID but has a requested IP — client is rebooting and
                  * trying to reclaim the address it had before */
-                char *existing = find_existing_lease(device_id, config);
+                char *existing = current_address(mac_str, device_id, config);
                 if (!existing) {
                     int rc = unknown_lease(request, response, config, pkt_len, device_id,
                                            opts->requested_ip, false, mac_str,
@@ -230,7 +238,7 @@ int process_dhcp_message(struct dhcp_packet *request,
                 /* No server ID and no requested IP — client is renewing or rebinding.
                  * ciaddr is its current address; make sure it matches what we have. */
                 if (request->ciaddr != 0) {
-                    char *existing = find_existing_lease(device_id, config);
+                    char *existing = current_address(mac_str, device_id, config);
                     if (!existing) {
                         int rc = unknown_lease(request, response, config, pkt_len,
                                                device_id, request->ciaddr, true,
@@ -316,6 +324,11 @@ int process_dhcp_message(struct dhcp_packet *request,
 
         case DHCPINFORM:
             if (to_everyone && !mine) return -1;
+            /* The reply goes to ciaddr; without one there's nowhere to send it */
+            if (request->ciaddr == 0) {
+                syslog(LOG_DEBUG, "DHCPINFORM from %s without ciaddr — ignored", mac_str);
+                return -1;
+            }
             syslog(LOG_INFO, "DHCPINFORM from %s", mac_str);
             if (build_inform_ack(response, request, opts, config, pkt_len) < 0) {
                 syslog(LOG_ERR, "Failed to build INFORM ACK for %s", mac_str);

@@ -172,6 +172,10 @@ def main():
         ip, srv = pos
         pkt = build(DECLINE, mac, xid, opts=base + [(50, ip2b(ip)), (54, ip2b(srv))])
         out = exchange(iface, pkt, xid, "255.255.255.255", 0.3)
+    elif cmd == "inform":
+        (ip,) = pos
+        pkt = build(INFORM, mac, xid, ciaddr=ip, opts=base)
+        out = exchange(iface, pkt, xid, "255.255.255.255", wait)
     elif cmd == "relay":
         gi, srv = pos
         pkt = build(DISCOVER, mac, xid, giaddr=gi, broadcast=False, opts=base)

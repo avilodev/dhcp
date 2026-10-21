@@ -13,6 +13,8 @@ char *allocate_ip_address(const char *mac, dhcp_options_t *opts,
                           dhcp_config_t *config);
 char *find_existing_lease(const char *device_id, dhcp_config_t *config);
 char *check_static_assignment(const char *mac, dhcp_config_t *config);
+char *current_address(const char *mac, const char *device_id,
+                      dhcp_config_t *config);
 char *find_free_ip(dhcp_config_t *config, const char *device_id);
 
 /* ---- IP ownership ---------------------------------------------------------

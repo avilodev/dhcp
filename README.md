@@ -29,22 +29,27 @@ dhcp/
   tests/            End-to-end tests (`make test`, no sudo needed)
   obj/              Build artifacts (created automatically)
   bin/              The server binary (created automatically)
-  cron_scripts/
+  scripts/
     dhcp-startup    Boot launcher — what `make install` runs at @reboot
-  misc/
+    maintenance.sh  Nightly cleanup (log rotation, backups)
+    new-instance.sh Adds another cluster node on this machine (`make instance`)
+  config/           Everything you edit
     dhcp.conf.in    Config template (the repo path is stamped in at build time)
     dhcp.conf       Main config — edit this first (created from .in by the first
                     `make`; never overwritten after that — `make config-diff`
                     shows options added to the template since)
     static_list.txt Devices that always get the same IP
     blacklist.txt   Devices that get ignored completely
+    instance.conf.in      Template for extra instances (`make instance`)
+    cluster.conf.example  Template for cluster mode (see CLUSTER.md)
+  etc/              Everything the server writes — don't edit, safe to read
     leases.journal  The lease database — one line per lease change (append-only)
     members.txt     Who currently has a lease (rebuilt from the journal)
-    cluster.conf.example  Template for cluster mode (see CLUSTER.md)
     server.log      What the server has been doing
     server.pid      The running server's process ID
-    maintence.sh    Nightly cleanup script
-    backups/        Daily backups of the journal, members.txt and server.log
+    refresh.log     Output of the cron jobs
+    backups/        Daily backups of the journal and members.txt
+    logs/           Archived server.log, one per day (logs/YYYY/MM/DD/)
 ```
 
 ---
@@ -68,7 +73,7 @@ The binary ends up at `bin/dhcp_server`.
 
 ### 3. Configure it
 
-Open `misc/dhcp.conf`. The main things to set for your network:
+Open `config/dhcp.conf`. The main things to set for your network:
 
 ```
 server_ip    192.168.1.2       # This machine's IP on the LAN
@@ -84,7 +89,7 @@ Everything else in the file points to the right places already and shouldn't nee
 
 ### 4. Give devices fixed IPs (optional)
 
-Edit `misc/static_list.txt`. One device per line — a label, then the MAC, then the IP:
+Edit `config/static_list.txt`. One device per line — a label, then the MAC, then the IP:
 
 ```
 my-laptop  AA:BB:CC:DD:EE:FF  192.168.1.5
@@ -94,7 +99,7 @@ The label is just for you, the server doesn't use it. Pick IPs outside your pool
 
 ### 5. Block devices (optional)
 
-Edit `misc/blacklist.txt`. One MAC per line. The server will silently ignore any traffic from those devices:
+Edit `config/blacklist.txt`. One MAC per line, any case. The server will silently ignore any traffic from those devices. A reload (`kill -HUP`) applies additions and removals:
 
 ```
 AA:BB:CC:DD:EE:FF
@@ -116,12 +121,12 @@ Same idea for anything else that might be handing out IPs on your LAN.
 Port 67 needs root:
 
 ```bash
-sudo bin/dhcp_server misc/dhcp.conf
+sudo bin/dhcp_server config/dhcp.conf
 ```
 
 That runs in the foreground — handy for a first test (you'll see it log to the terminal; Ctrl-C to stop). To have it start on boot and keep itself maintained, use `make install` in the next step instead.
 
-It needs root only to bind port 67. To have it drop back to an unprivileged user for the rest of its run, uncomment the `user` line in `misc/dhcp.conf` (set it to whoever owns `misc/`). With that set, a compromise of the daemon no longer hands an attacker root.
+It needs root only to bind port 67. After that it drops to the `user` in `config/dhcp.conf`, which `make` fills in as the owner of this checkout. A compromise of the daemon then no longer hands an attacker root, and every file it writes belongs to you, so logs and backups can be read and deleted without sudo. Starting a second copy on the same config is refused.
 
 ### 8. Install it to start at boot (recommended)
 
@@ -131,16 +136,16 @@ sudo make install
 
 This builds the server and installs two cron jobs under `/etc/cron.d`:
 
-- **`dhcp-startup`** — an `@reboot` entry that launches the server every time the Pi boots.
-- **`dhcp-maintenance`** — runs nightly at 03:00 to prune leases that expired without a clean release, rotate `server.log` if it gets big, and clear out old backups.
+- **`dhcp-startup`** — launches the server every time the Pi boots (waiting up to a minute for `server_ip` to come up), then checks every 5 minutes and restarts it if it has died.
+- **`dhcp-maintenance`** — runs nightly at 03:00, as you rather than root, to archive `server.log` to `etc/logs/YYYY/MM/DD/`, back up the lease journal and `members.txt`, and clear out archives and backups older than 30 days.
 
 Every path is derived from wherever the repo lives, so there's nothing to hand-edit. Reboot to start it automatically, or launch it right now with the same command boot uses:
 
 ```bash
-sudo cron_scripts/dhcp-startup
+sudo scripts/dhcp-startup
 ```
 
-To change *how* it starts at boot, edit `cron_scripts/dhcp-startup` — the cron entry points back at that file, so changes take effect on the next boot with no reinstall.
+To change *how* it starts, edit `scripts/dhcp-startup` — the cron entries point back at that file, so changes take effect on its next run with no reinstall.
 
 To remove both cron jobs:
 
@@ -154,37 +159,37 @@ sudo make uninstall
 
 **Reload static assignments or blacklist without restarting:**
 ```bash
-sudo kill -HUP $(cat misc/server.pid)
+sudo kill -HUP $(cat etc/server.pid)
 ```
 
 **Dump the current in-memory lease table to a file:**
 ```bash
-sudo kill -USR1 $(cat misc/server.pid)
+sudo kill -USR1 $(cat etc/server.pid)
 ```
 
 **Watch what the server is doing live:**
 ```bash
-tail -f misc/server.log
+tail -f etc/server.log
 ```
 
 **See who currently has a lease:**
 ```bash
-cat misc/members.txt
+cat etc/members.txt
 ```
 Columns: `device_id,mac,ip,hostname,expires,node`. `node` is which server issued the lease.
 
 **Compact the journal now (it happens hourly anyway):**
 ```bash
-sudo kill -USR2 $(cat misc/server.pid)
+sudo kill -USR2 $(cat etc/server.pid)
 ```
 
 **Start it (same command boot uses):**
 ```bash
-sudo cron_scripts/dhcp-startup
+sudo scripts/dhcp-startup
 ```
 
 **Stop the server:**
 ```bash
-sudo kill $(cat misc/server.pid)
+sudo kill $(cat etc/server.pid)
 ```
-If you installed it with `make install`, this just stops the running process — it'll start again on the next reboot. Run `sudo make uninstall` first if you want it gone for good.
+If you installed it with `make install`, the 5-minute check starts it again — which is all a restart after a config change needs. To keep it stopped, run `sudo make uninstall` first.

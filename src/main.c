@@ -12,10 +12,17 @@
 #include <poll.h>
 #include <pwd.h>
 #include <grp.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <sys/file.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <linux/capability.h>
 
 #define COMPACT_INTERVAL   3600   /* hourly: rewrite the journal as just live records */
 #define SWEEP_INTERVAL     60     /* reclaim expired leases on a timer */
 #define SNAPSHOT_INTERVAL  1      /* members.txt refreshed at most this often */
+#define NET_CHECK_INTERVAL 10     /* re-find server_ip's interface (and bind it if late) */
 
 /* Each received packet gets copied into a queue slot so the main thread can
  * loop straight back to recvmsg without waiting for a worker to finish. */
@@ -112,25 +119,48 @@ static int setup_signals(void) {
 }
 
 /* --------------------------------------------------------------------------
- * PID file
+ * PID file — also the single-instance lock.  It stays open and flock()ed for
+ * the server's whole life, so a second copy started on the same config
+ * refuses to run (SO_REUSEPORT would otherwise let both bind port 67 and both
+ * answer).  The kernel drops the lock when we exit, however we exit, so a
+ * stale file left by a crash never blocks the next start.
  * -------------------------------------------------------------------------- */
-static int write_pid_file(void) {
-    int fd = open(g_config.pid_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+static int g_pid_fd = -1;   /* >= 0 once the lock is ours */
+
+static int acquire_pid_file(void) {
+    int fd = open(g_config.pid_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
     if (fd < 0) {
-        syslog(LOG_ERR, "Failed to create PID file: %s", strerror(errno));
+        fprintf(stderr, "Error: cannot open PID file %s: %s\n",
+                g_config.pid_path, strerror(errno));
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        char other[32] = "";
+        ssize_t n = read(fd, other, sizeof(other) - 1);
+        other[n > 0 ? n : 0] = '\0';
+        other[strcspn(other, "\n")] = '\0';
+        fprintf(stderr, "Error: already running (pid %s) — %s is locked\n",
+                other[0] ? other : "?", g_config.pid_path);
+        syslog(LOG_ERR, "Already running (pid %s) — not starting a second copy",
+               other[0] ? other : "?");
+        close(fd);
         return -1;
     }
     char pid_str[32];
-    snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
-    if (write(fd, pid_str, strlen(pid_str)) < 0)
+    int len = snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
+    if (ftruncate(fd, 0) < 0 || pwrite(fd, pid_str, (size_t)len, 0) != len)
         syslog(LOG_ERR, "Failed to write PID file: %s", strerror(errno));
-    close(fd);
+    g_pid_fd = fd;
     return 0;
 }
 
+/* Only the instance holding the lock removes the file — a copy that was
+ * refused must leave the running server's PID file alone. */
 static void remove_pid_file(void) {
-    if (g_config.pid_path)
-        unlink(g_config.pid_path);
+    if (g_pid_fd < 0) return;
+    unlink(g_config.pid_path);
+    close(g_pid_fd);
+    g_pid_fd = -1;
 }
 
 /* --------------------------------------------------------------------------
@@ -159,6 +189,21 @@ static int drop_privileges(const char *username) {
         return -1;
     }
 
+    /* Files opened as root before this point would stay root-owned (and
+     * undeletable without sudo once their directory is the user's) */
+    if (g_pid_fd >= 0 && fchown(g_pid_fd, pw->pw_uid, pw->pw_gid) != 0)
+        syslog(LOG_WARNING, "drop_privileges: chown of PID file failed: %s",
+               strerror(errno));
+    if (journal_chown(pw->pw_uid, pw->pw_gid) != 0)
+        syslog(LOG_WARNING, "drop_privileges: chown of the journal failed: %s",
+               strerror(errno));
+
+    /* Carry capabilities across the uid change so we can keep the one we
+     * still need (below) — the rest are thrown away right after. */
+    if (prctl(PR_SET_KEEPCAPS, 1) != 0)
+        syslog(LOG_WARNING, "drop_privileges: PR_SET_KEEPCAPS failed: %s",
+               strerror(errno));
+
     if (setgid(pw->pw_gid) != 0) {
         syslog(LOG_ERR, "drop_privileges: setgid(%d) failed: %s",
                (int)pw->pw_gid, strerror(errno));
@@ -173,6 +218,19 @@ static int drop_privileges(const char *username) {
         return -1;
     }
 
+    prctl(PR_SET_KEEPCAPS, 0);
+
+    /* Keep only CAP_NET_BIND_SERVICE: if server_ip wasn't up yet at start,
+     * the main loop binds server_ip:67 later, and port 67 needs it. */
+    struct __user_cap_header_struct hdr = { _LINUX_CAPABILITY_VERSION_3, 0 };
+    struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3];
+    memset(caps, 0, sizeof(caps));
+    caps[0].permitted = caps[0].effective = 1u << CAP_NET_BIND_SERVICE;
+    bool kept = syscall(SYS_capset, &hdr, caps) == 0;
+    if (!kept)
+        syslog(LOG_WARNING, "drop_privileges: couldn't keep CAP_NET_BIND_SERVICE "
+               "(%s) — server_ip must be up at start", strerror(errno));
+
     /* Refuse to continue if root can be regained — a successful setuid(0) here
      * means the drop didn't really stick. */
     if (setuid(0) == 0) {
@@ -180,8 +238,9 @@ static int drop_privileges(const char *username) {
         return -1;
     }
 
-    syslog(LOG_INFO, "Dropped privileges to '%s' (uid=%d gid=%d)",
-           username, (int)pw->pw_uid, (int)pw->pw_gid);
+    syslog(LOG_INFO, "Dropped privileges to '%s' (uid=%d gid=%d%s)",
+           username, (int)pw->pw_uid, (int)pw->pw_gid,
+           kept ? ", keeping only the right to bind port 67" : "");
     return 0;
 }
 
@@ -202,8 +261,8 @@ static void cleanup_and_exit(int exit_code) {
 
     peer_stop();
     journal_close();
+    remove_pid_file();           /* before cleanup_config frees its path */
     cleanup_config();
-    remove_pid_file();
 
     syslog(LOG_INFO, "DHCP server stopped");
     closelog();
@@ -446,7 +505,8 @@ static void *worker_thread(void *arg) {
 
         /* From our own address when we have it, so the reply's source matches
          * the server identifier even when this machine has several. */
-        int send_fd = g_own_socket >= 0 ? g_own_socket : g_server_socket;
+        int own_fd  = __atomic_load_n(&g_own_socket, __ATOMIC_ACQUIRE);
+        int send_fd = own_fd >= 0 ? own_fd : g_server_socket;
         ssize_t sent = sendmsg(send_fd, &send_msg, 0);
         if (sent < 0)
             syslog(LOG_ERR, "sendmsg failed: %s", strerror(errno));
@@ -534,6 +594,55 @@ static void housekeeping(void) {
     }
 }
 
+/* --------------------------------------------------------------------------
+ * Which interface is our LAN — checked between packets, never on a worker.
+ * -------------------------------------------------------------------------- */
+static time_t g_last_netcheck = 0;
+static int    g_lan_ifindex   = 0;   /* interface holding server_ip; 0 = none (yet) */
+static bool   g_late_bind_warned = false;
+
+/* Index of the interface that holds `ip`, or 0 if none does */
+static int interface_with(uint32_t ip) {
+    struct ifaddrs *ifs;
+    int idx = 0;
+    if (getifaddrs(&ifs) < 0) return 0;
+    for (struct ifaddrs *i = ifs; i; i = i->ifa_next) {
+        if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET &&
+            ((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr == ip) {
+            idx = (int)if_nametoindex(i->ifa_name);
+            break;
+        }
+    }
+    freeifaddrs(ifs);
+    return idx;
+}
+
+/* Track where server_ip lives, and bind it once it shows up if it wasn't up
+ * when we started (cron's @reboot can beat the network). */
+static void check_network(uint32_t our_ip) {
+    time_t now = time(NULL);
+    if (g_last_netcheck && now - g_last_netcheck < NET_CHECK_INTERVAL) return;
+    g_last_netcheck = now;
+
+    int idx = interface_with(our_ip);
+    if (idx != g_lan_ifindex && idx > 0)
+        syslog(LOG_INFO, "server_ip %s is on interface %d — answering broadcasts "
+               "there only", g_config.server_ip, idx);
+    g_lan_ifindex = idx;
+
+    if (g_own_socket >= 0 || idx == 0) return;
+    int fd = create_own_socket(g_config.server_ip);
+    if (fd >= 0) {
+        __atomic_store_n(&g_own_socket, fd, __ATOMIC_RELEASE);
+        syslog(LOG_INFO, "server_ip %s is up now — bound %s:%d",
+               g_config.server_ip, g_config.server_ip, DHCP_SERVER_PORT);
+    } else if (!g_late_bind_warned) {
+        g_late_bind_warned = true;
+        syslog(LOG_WARNING, "server_ip %s is up but binding it failed: %s — "
+               "using the shared socket only", g_config.server_ip, strerror(errno));
+    }
+}
+
 static void usage(void) {
     fprintf(stderr,
         "usage: dhcp_server [-v] [--controller] [--node-id ID] [dhcp.conf]\n"
@@ -605,6 +714,11 @@ int main(int argc, char **argv) {
     bool cluster    = g_config.node_id != NULL;
     bool controller = cluster && g_config.role == ROLE_CONTROLLER;
 
+    /* Before touching the journal: a second copy must not replay or append
+     * to the files the running server owns. */
+    if (acquire_pid_file() < 0)
+        cleanup_and_exit(1);
+
     if (init_data_structures() < 0) {
         fprintf(stderr, "Failed to initialize data structures\n");
         cleanup_and_exit(1);
@@ -656,11 +770,6 @@ int main(int argc, char **argv) {
     if (!g_queue || !g_workers) {
         fprintf(stderr, "Failed to allocate thread pool memory\n");
         free(g_queue); free(g_workers);
-        cleanup_and_exit(1);
-    }
-
-    if (write_pid_file() < 0) {
-        fprintf(stderr, "Failed to write PID file\n");
         cleanup_and_exit(1);
     }
 
@@ -745,6 +854,7 @@ int main(int argc, char **argv) {
             nanosleep(&ts, NULL);                  /* signals cut this short */
             continue;
         }
+        check_network(our_ip);
 
         /* ---- wait for a packet on either socket (1 s so timers still run) ---- */
         struct pollfd pfd[2] = {
@@ -804,6 +914,16 @@ int main(int argc, char **argv) {
                 broadcast = pi->ipi_addr.s_addr != our_ip;
                 break;
             }
+        }
+
+        /* A second interface on the same LAN (Wi-Fi next to Ethernet) hears
+         * every broadcast too, and we'd answer each client twice.  Broadcasts
+         * are answered only on the interface holding server_ip; relayed and
+         * renewal packets are addressed to us and answered wherever they land. */
+        if (broadcast && g_lan_ifindex > 0 && ifindex != g_lan_ifindex) {
+            syslog(LOG_DEBUG, "Ignoring broadcast on interface %d (server_ip is on %d)",
+                   ifindex, g_lan_ifindex);
+            continue;
         }
 
         packet_count++;
